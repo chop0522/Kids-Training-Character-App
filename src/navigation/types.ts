@@ -7,4 +7,6 @@ export type RootStackParamList = {
   Achievements: { childId: string };
   SessionDetail: { childId: string; sessionId: string };
   ActivityTimeline: { childId: string; activityId: string };
+  ParentSettings: undefined;
+  SkinShop: { childId: string };
 };

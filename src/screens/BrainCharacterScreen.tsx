@@ -4,33 +4,22 @@ import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../navigation/types';
 import { useAppStore } from '../store/AppStoreContext';
 import { theme } from '../theme';
-import { CharacterSkin } from '../types';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'BrainCharacter'>;
 
-const AVAILABLE_SKINS: CharacterSkin[] = [
-  {
-    id: 'default_pink',
-    name: 'ピンクブレイン',
-    type: 'original',
-    isPremium: false,
-    assetKey: 'brain_default_pink',
-  },
-  {
-    id: 'cool_blue',
-    name: 'クールブルー',
-    type: 'original',
-    isPremium: false,
-    assetKey: 'brain_cool_blue',
-  },
-];
-
 export function BrainCharacterScreen({ navigation, route }: Props) {
-  const { getChildById, getBrainCharacterForChild, petBrainCharacter, feedBrainCharacter, setBrainCharacterSkin } =
-    useAppStore();
+  const {
+    getChildById,
+    getBrainCharacterForChild,
+    petBrainCharacter,
+    feedBrainCharacter,
+    setBrainCharacterSkin,
+    getOwnedSkinsForChild,
+  } = useAppStore();
   const childId = route.params.childId;
   const child = getChildById(childId);
   const brain = getBrainCharacterForChild(childId);
+  const ownedSkins = getOwnedSkinsForChild(childId);
 
   const xpProgress = useMemo(() => {
     if (!brain) return { percent: 0, current: 0, target: 100 };
@@ -44,8 +33,8 @@ export function BrainCharacterScreen({ navigation, route }: Props) {
   }, [brain]);
 
   const moodLabel = getMoodLabel(brain?.mood ?? 0);
-  const skinList = AVAILABLE_SKINS;
-  const activeSkinId = brain?.skinId ?? skinList[0].id;
+  const skinList = ownedSkins;
+  const activeSkinId = brain?.skinId ?? (skinList[0]?.id ?? '');
 
   if (!child || !brain) {
     return (
@@ -118,11 +107,17 @@ export function BrainCharacterScreen({ navigation, route }: Props) {
         <Text style={styles.coinText}>所持コイン: {child.coins}</Text>
 
         <View style={styles.skinsCard}>
-          <Text style={styles.skinsTitle}>きせかえ</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.skinsScroll}>
-            {skinList.map((skin) => {
-              const selected = skin.id === activeSkinId;
-              return (
+        <Text style={styles.skinsTitle}>きせかえ</Text>
+        <Pressable
+          style={({ pressed }) => [styles.shopButton, pressed && styles.shopButtonPressed]}
+          onPress={() => navigation.navigate('SkinShop', { childId })}
+        >
+          <Text style={styles.shopButtonText}>ショップ・ガチャ</Text>
+        </Pressable>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.skinsScroll}>
+          {skinList.map((skin) => {
+            const selected = skin.id === activeSkinId;
+            return (
                 <Pressable
                   key={skin.id}
                   onPress={() => handleSelectSkin(skin.id)}
@@ -297,12 +292,28 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.surface,
     borderRadius: theme.radius.md,
     padding: theme.spacing.md,
+    marginTop: theme.spacing.md,
     ...theme.shadows.card,
   },
   skinsTitle: {
     ...theme.typography.heading2,
     color: theme.colors.textMain,
     marginBottom: theme.spacing.sm,
+  },
+  shopButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: theme.colors.accent,
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+    marginBottom: theme.spacing.sm,
+  },
+  shopButtonPressed: {
+    opacity: 0.9,
+  },
+  shopButtonText: {
+    ...theme.typography.label,
+    color: '#fff',
   },
   skinsScroll: {
     flexDirection: 'row',

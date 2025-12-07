@@ -64,12 +64,22 @@ export type Media = {
   order: number;
 };
 
+export type CharacterSkinRarity = 'common' | 'rare' | 'epic';
+
 export type CharacterSkin = {
   id: string;
   name: string;
   type: 'original' | 'meme';
-  isPremium: boolean;
+  rarity: CharacterSkinRarity;
+  isDefault: boolean;
+  priceCoins?: number;
+  availableIn: 'shop' | 'gacha' | 'both';
   assetKey: string; // key to find the image asset
+};
+
+export type OwnedSkin = {
+  childId: string;
+  skinId: string;
 };
 
 export type BrainCharacter = {
@@ -123,6 +133,15 @@ export type AchievementKey =
 
 export type AppSettings = {
   enableMemeSkins: boolean;
+  enableGacha: boolean;
+  parentPin?: string;
+};
+
+export type TrainingResult = {
+  sessionId: string;
+  levelUps: number;
+  completedNodes: MapNode[];
+  unlockedAchievements: Achievement[];
 };
 
 export type AppState = {
@@ -134,6 +153,7 @@ export type AppState = {
   mediaItems: Media[];
   media?: Media[]; // legacy key for compatibility
   characterSkins: CharacterSkin[];
+  ownedSkins: OwnedSkin[];
   brainCharacters: BrainCharacter[];
   mapNodes: MapNode[];
   achievements: Achievement[];

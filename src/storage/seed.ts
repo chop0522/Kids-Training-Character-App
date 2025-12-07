@@ -1,13 +1,8 @@
 import { nanoid } from 'nanoid/non-secure';
-import { Activity, AppState, BrainCharacter, CharacterSkin, ChildProfile, Family } from '../types';
+import { Activity, AppState, BrainCharacter, ChildProfile, Family, OwnedSkin } from '../types';
 import { getLevelFromXp } from '../utils/progress';
 import { generateInitialMapForChild } from '../mapConfig';
-
-const defaultSkins: CharacterSkin[] = [
-  { id: 'skin-original-1', name: 'Spark Brain', type: 'original', isPremium: false, assetKey: 'brain_spark' },
-  { id: 'skin-original-2', name: 'Galaxy Brain', type: 'original', isPremium: false, assetKey: 'brain_galaxy' },
-  { id: 'skin-meme-1', name: 'Meme Brain', type: 'meme', isPremium: true, assetKey: 'brain_meme' },
-];
+import { CHARACTER_SKINS } from '../characterSkinsConfig';
 
 const defaultActivities: Activity[] = [
   { id: 'act-soccer', familyId: null, name: 'サッカー', category: 'sports', iconKey: '⚽️' },
@@ -57,11 +52,15 @@ export function createSeedState(): AppState {
     makeChild(family.id, 'ケン', 'lightning', 120, 45),
   ];
 
+  const defaultSkin = CHARACTER_SKINS.find((s) => s.isDefault) ?? CHARACTER_SKINS[0];
   const brainCharacters: BrainCharacter[] = children.map((child) =>
-    makeBrainCharacter(child.id, defaultSkins[0].id, child.level, child.xp)
+    makeBrainCharacter(child.id, defaultSkin.id, child.level, child.xp)
   );
 
   const mapNodes = children.flatMap((child) => generateInitialMapForChild(child.id));
+  const ownedSkins: OwnedSkin[] = defaultSkin
+    ? children.map((child) => ({ childId: child.id, skinId: defaultSkin.id }))
+    : [];
 
   return {
     families: [family],
@@ -71,11 +70,12 @@ export function createSeedState(): AppState {
     sessions: [],
     mediaItems: [],
     media: [],
-    characterSkins: defaultSkins,
+    characterSkins: CHARACTER_SKINS,
     brainCharacters,
     mapNodes,
     achievements: [],
     childAchievements: [],
-    settings: { enableMemeSkins: false },
+    ownedSkins,
+    settings: { enableMemeSkins: false, enableGacha: true, parentPin: undefined },
   };
 }

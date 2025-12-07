@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -47,7 +48,7 @@ export function TrainingLogScreen({ navigation, route }: Props) {
   const handleSave = () => {
     if (!child || !activityId || !canSave) return;
     setSaving(true);
-    logTrainingSession({
+    const result = logTrainingSession({
       childId: child.id,
       activityId,
       durationMinutes,
@@ -55,6 +56,20 @@ export function TrainingLogScreen({ navigation, route }: Props) {
       note: note.trim() || undefined,
     });
     setSaving(false);
+    if (!result) {
+      showAlert('エラー', '保存に失敗しました');
+      return;
+    }
+    if (result.levelUps > 0) {
+      showAlert('レベルアップ！', 'レベルが上がったよ！');
+    }
+    if (result.completedNodes.some((n) => n.type === 'treasure')) {
+      showAlert('宝箱マスクリア！', 'ごほうびコインをゲット！');
+    }
+    if (result.unlockedAchievements.length > 0) {
+      const a = result.unlockedAchievements[0];
+      showAlert('バッジをてにいれた！', a.title);
+    }
     navigation.navigate('ChildDashboard', { childId: child.id });
   };
 
@@ -172,6 +187,18 @@ export function TrainingLogScreen({ navigation, route }: Props) {
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
+}
+
+function showAlert(title: string, message?: string) {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.alert) {
+      window.alert(`${title}${message ? `\n${message}` : ''}`);
+    } else {
+      console.log(title, message);
+    }
+  } else {
+    Alert.alert(title, message);
+  }
 }
 
 const styles = StyleSheet.create({

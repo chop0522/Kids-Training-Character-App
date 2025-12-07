@@ -44,3 +44,10 @@ export function applyXpToLevel(
 
   return { level, xp };
 }
+
+export function getMoodBonus(mood: number): { xpMultiplier: number; extraCoins: number } {
+  if (mood >= 70) {
+    return { xpMultiplier: 1.1, extraCoins: 1 };
+  }
+  return { xpMultiplier: 1.0, extraCoins: 0 };
+}

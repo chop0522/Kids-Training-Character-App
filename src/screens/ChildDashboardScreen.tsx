@@ -55,12 +55,14 @@ type DashboardProps = {
   streak: StreakData;
   todayQuest: TodayQuest;
   badges: BadgesPreview;
+  activitiesUsedByChild: Activity[];
   todayComment?: string;
   onPressSettings: () => void;
   onPressLogTraining: () => void;
   onPressOpenCharacter: () => void;
   onPressOpenMap: () => void;
   onPressOpenBadges: () => void;
+  onPressOpenTimeline: (activityId: string) => void;
   onPressEditComment: () => void;
 };
 
@@ -79,6 +81,7 @@ export function ChildDashboardScreen({ navigation, route }: Props) {
     getCurrentMapNodeForChild,
     getAchievementsForChild,
     getUnlockedAchievementCountForChild,
+    getActivitiesForFamily,
   } = useAppStore();
   const childId = route.params?.childId ?? selectedChildId ?? null;
   const [todayComment, setTodayComment] = useState<string | undefined>(undefined);
@@ -142,6 +145,14 @@ export function ChildDashboardScreen({ navigation, route }: Props) {
       icons,
     };
   }, [achievementsForChild, child.id, getUnlockedAchievementCountForChild]);
+  const activitiesForFamily = useMemo(
+    () => getActivitiesForFamily(child.familyId),
+    [getActivitiesForFamily, child.familyId]
+  );
+  const activitiesUsedByChild = useMemo(() => {
+    const ids = new Set(sessionsForChild.map((s) => s.activityId));
+    return activitiesForFamily.filter((a) => ids.has(a.id)).slice(0, 3);
+  }, [activitiesForFamily, sessionsForChild]);
   const levelInfo = useMemo(() => getLevelProgress(child.level, child.xp), [child.level, child.xp]);
 
   const openCommentEditor = () => {
@@ -165,12 +176,16 @@ export function ChildDashboardScreen({ navigation, route }: Props) {
           streak={streak}
           todayQuest={todayQuest}
           badges={badges}
+          activitiesUsedByChild={activitiesUsedByChild}
           todayComment={todayComment}
-          onPressSettings={() => navigation.navigate('FamilySelection')}
+          onPressSettings={() => navigation.navigate('ParentSettings')}
           onPressLogTraining={() => navigation.navigate('TrainingLog', { childId: child.id })}
           onPressOpenCharacter={() => navigation.navigate('BrainCharacter', { childId: child.id })}
           onPressOpenMap={() => navigation.navigate('Map', { childId: child.id })}
           onPressOpenBadges={() => navigation.navigate('Achievements', { childId: child.id })}
+          onPressOpenTimeline={(activityId) =>
+            navigation.navigate('ActivityTimeline', { childId: child.id, activityId })
+          }
           onPressEditComment={openCommentEditor}
           levelInfo={levelInfo}
         />
@@ -217,12 +232,14 @@ function ChildDashboardContent({
   streak,
   todayQuest,
   badges,
+  activitiesUsedByChild,
   todayComment,
   onPressSettings,
   onPressLogTraining,
   onPressOpenCharacter,
   onPressOpenMap,
   onPressOpenBadges,
+  onPressOpenTimeline,
   onPressEditComment,
   levelInfo,
 }: DashboardProps & { levelInfo: LevelInfo }) {
@@ -239,6 +256,7 @@ function ChildDashboardContent({
       <MapPreviewCard mapProgress={mapProgress} onPressOpenMap={onPressOpenMap} />
       <StreakAndHistoryCard streak={streak} />
       <BadgesPreviewCard badges={badges} onPressOpenBadges={onPressOpenBadges} />
+      <GrowthCard activities={activitiesUsedByChild} onPressOpenTimeline={onPressOpenTimeline} />
       <TodayCommentCard comment={todayComment} onPressEditComment={onPressEditComment} />
     </>
   );
@@ -420,6 +438,38 @@ function BadgesPreviewCard({ badges, onPressOpenBadges }: { badges: BadgesPrevie
         <Text style={styles.badgeMoreText}>もっとみる ›</Text>
       </View>
     </Pressable>
+  );
+}
+
+function GrowthCard({
+  activities,
+  onPressOpenTimeline,
+}: {
+  activities: Activity[];
+  onPressOpenTimeline: (activityId: string) => void;
+}) {
+  return (
+    <View style={styles.growthCard}>
+      <View style={styles.growthHeaderRow}>
+        <Text style={styles.growthTitle}>成長を見る</Text>
+        {activities.length > 0 && <Text style={styles.growthSubtitle}>{activities.length}種類のきろく</Text>}
+      </View>
+      {activities.length === 0 ? (
+        <Text style={styles.growthEmptyText}>まだ写真・動画つきのきろくがありません</Text>
+      ) : (
+        <View style={styles.growthChipsRow}>
+          {activities.map((activity) => (
+            <Pressable
+              key={activity.id}
+              style={({ pressed }) => [styles.growthChip, pressed && styles.pressed]}
+              onPress={() => onPressOpenTimeline(activity.id)}
+            >
+              <Text style={styles.growthChipText}>{activity.name}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -871,6 +921,50 @@ const styles = StyleSheet.create({
   badgeMoreText: {
     ...theme.typography.caption,
     color: theme.colors.accent,
+  },
+  growthCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    ...theme.shadows.card,
+  },
+  growthHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: theme.spacing.sm,
+  },
+  growthTitle: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+  },
+  growthSubtitle: {
+    ...theme.typography.label,
+    color: theme.colors.textSub,
+  },
+  growthEmptyText: {
+    ...theme.typography.body,
+    color: theme.colors.textSub,
+  },
+  growthChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: theme.spacing.xs,
+  },
+  growthChip: {
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+    marginRight: theme.spacing.sm,
+    marginBottom: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceAlt,
+  },
+  growthChipText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
   },
   streakRow: {
     flexDirection: 'row',

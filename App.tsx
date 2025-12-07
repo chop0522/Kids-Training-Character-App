@@ -9,6 +9,8 @@ import { BrainCharacterScreen } from './src/screens/BrainCharacterScreen';
 import { AchievementsScreen } from './src/screens/AchievementsScreen';
 import { SessionDetailScreen } from './src/screens/SessionDetailScreen';
 import { ActivityTimelineScreen } from './src/screens/ActivityTimelineScreen';
+import { ParentSettingsScreen } from './src/screens/ParentSettingsScreen';
+import { SkinShopScreen } from './src/screens/SkinShopScreen';
 import { RootStackParamList } from './src/navigation/types';
 import { theme } from './src/theme';
 
@@ -34,6 +36,8 @@ export default function App() {
           <Stack.Screen name="Achievements" component={AchievementsScreen} options={{ title: 'バッジ' }} />
           <Stack.Screen name="SessionDetail" component={SessionDetailScreen} options={{ title: 'セッション詳細' }} />
           <Stack.Screen name="ActivityTimeline" component={ActivityTimelineScreen} options={{ title: 'タイムライン' }} />
+          <Stack.Screen name="ParentSettings" component={ParentSettingsScreen} options={{ title: '親モード設定' }} />
+          <Stack.Screen name="SkinShop" component={SkinShopScreen} options={{ title: 'スキンショップ' }} />
         </Stack.Navigator>
       </NavigationContainer>
     </AppStoreProvider>
