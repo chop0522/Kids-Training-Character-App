@@ -1,4 +1,5 @@
-import React, { createContext, ReactNode, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, SafeAreaView, Text } from 'react-native';
 import { nanoid } from 'nanoid/non-secure';
 import {
   Activity,
@@ -17,12 +18,14 @@ import {
   TrainingResult,
   TrainingSession,
 } from '../types';
-import { loadAppState, saveAppState } from '../storage/appStorage';
+import { clearPersistedState, loadPersistedState, savePersistedState } from '../storage/appStateStorage';
 import { applyXpToLevel, calculateCoins, calculateXp, EffortLevel, getMoodBonus } from '../xp';
 import { generateInitialMapForChild } from '../mapConfig';
 import { ACHIEVEMENTS, getAchievementByKey } from '../achievementsConfig';
 import { CHARACTER_SKINS, getAllSkins, getSkinById } from '../characterSkinsConfig';
 import { createSeedState } from '../storage/seed';
+import { deleteFromAppStorageIfOwned } from '../media/localMediaStorage';
+import { theme } from '../theme';
 
 export type StreakInfo = {
   current: number;
@@ -51,7 +54,9 @@ export type AppStore = {
   }) => TrainingResult | null;
   updateSessionNote: (sessionId: string, note: string) => void;
   getMediaForSession: (sessionId: string) => Media[];
-  addMediaToSession: (input: { sessionId: string; type: MediaType; localUri: string }) => void;
+  addMediaToSession: (input: { sessionId: string; type: MediaType; localUri: string }) =>
+    | { ok: true; mediaId: string }
+    | { ok: false; reason: 'photo_limit' | 'video_limit' };
   removeMedia: (mediaId: string) => void;
 
   getChildById: (childId: string) => ChildProfile | undefined;
@@ -85,6 +90,8 @@ export type AppStore = {
 
 type AppStoreContextValue = AppStore & {
   isLoading: boolean;
+  isHydrating: boolean;
+  isHydrated: boolean;
   selectedChildId: string | null;
   selectChild: (id: string) => void;
   families: Family[];
@@ -99,38 +106,62 @@ type StoreState = AppState & {
 
 const AppStoreContext = createContext<AppStoreContextValue | undefined>(undefined);
 
+const SAVE_DEBOUNCE_MS = 600;
+
 export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<StoreState | null>(null);
   const [selectedChildId, setSelectedChildId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isHydrating, setIsHydrating] = useState(true);
+  const isLoading = isHydrating;
+  const isHydrated = !isHydrating;
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasHydratedRef = useRef(false);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const loaded = await loadAppState();
-      const streakByChildId = buildStreakMap(loaded.sessions, loaded.children);
-      let nextState: StoreState = {
-        ...loaded,
-        mediaItems: loaded.mediaItems ?? loaded.media ?? [],
-        media: loaded.mediaItems ?? loaded.media ?? [],
-        childAchievements: loaded.childAchievements ?? [],
-        ownedSkins: loaded.ownedSkins ?? [],
-        settings: {
-          enableMemeSkins: loaded.settings?.enableMemeSkins ?? false,
-          enableGacha: loaded.settings?.enableGacha ?? true,
-          parentPin: loaded.settings?.parentPin,
-        },
-        characterSkins: loaded.characterSkins?.length ? loaded.characterSkins : CHARACTER_SKINS,
-        streakByChildId,
-      };
+      const initialState = buildStoreState(createSeedState());
+      const loaded = await loadPersistedState<StoreState>();
+      if (cancelled) return;
+
+      let nextState = initialState;
+      if (loaded?.state) {
+        nextState = mergeWithInitialState(initialState, loaded.state);
+      }
       nextState = ensureMapsForChildren(nextState);
       setState(nextState);
       setSelectedChildId(nextState.children[0]?.id ?? null);
-      if (nextState.mapNodes.length !== loaded.mapNodes.length) {
-        persistState(nextState);
-      }
-      setIsLoading(false);
+      setIsHydrating(false);
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (isHydrating || !state) return;
+
+    if (!hasHydratedRef.current) {
+      hasHydratedRef.current = true;
+      return;
+    }
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = setTimeout(() => {
+      void savePersistedState(state);
+    }, SAVE_DEBOUNCE_MS);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [state, isHydrating]);
 
   const selectChild = (id: string) => setSelectedChildId(id);
 
@@ -177,7 +208,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     };
 
     setState(updatedState);
-    persistState(updatedState);
     setSelectedChildId(newChild.id);
     return newChild;
   };
@@ -297,8 +327,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       const newLevel = nextState.children.find((c) => c.id === childId)?.level ?? prevLevel;
       const levelUps = Math.max(0, newLevel - prevLevel);
 
-      persistState(nextState);
-
       result = {
         sessionId: newSession.id,
         levelUps,
@@ -316,7 +344,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       if (!prev) return prev;
       const sessions = prev.sessions.map((s) => (s.id === sessionId ? { ...s, note } : s));
       const nextState: StoreState = { ...prev, sessions };
-      persistState(nextState);
       return nextState;
     });
   };
@@ -329,21 +356,35 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   };
 
   const addMediaToSession = (input: { sessionId: string; type: MediaType; localUri: string }) => {
+    const { type } = input;
+    let response:
+      | { ok: true; mediaId: string }
+      | { ok: false; reason: 'photo_limit' | 'video_limit' } = {
+      ok: false,
+      reason: type === 'photo' ? 'photo_limit' : 'video_limit',
+    };
+
     setState((prev) => {
       if (!prev) return prev;
-      const { sessionId, type, localUri } = input;
+      const { sessionId, type: nextType, localUri } = input;
       const itemsForSession = prev.mediaItems.filter((m) => m.sessionId === sessionId);
       const photosCount = itemsForSession.filter((m) => m.type === 'photo').length;
       const videosCount = itemsForSession.filter((m) => m.type === 'video').length;
 
-      if ((type === 'photo' && photosCount >= 4) || (type === 'video' && videosCount >= 2)) {
+      if (nextType === 'photo' && photosCount >= 4) {
+        response = { ok: false, reason: 'photo_limit' };
+        return prev;
+      }
+
+      if (nextType === 'video' && videosCount >= 2) {
+        response = { ok: false, reason: 'video_limit' };
         return prev;
       }
 
       const newMedia: Media = {
         id: nanoid(12),
         sessionId,
-        type,
+        type: nextType,
         localUri,
         createdAt: new Date().toISOString(),
         order: itemsForSession.length,
@@ -351,16 +392,20 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
       const mediaItems = [...prev.mediaItems, newMedia];
       const nextState: StoreState = { ...prev, mediaItems, media: mediaItems };
-      persistState(nextState);
+      response = { ok: true, mediaId: newMedia.id };
       return nextState;
     });
+
+    return response;
   };
 
   const removeMedia = (mediaId: string) => {
+    let removedUri: string | null = null;
     setState((prev) => {
       if (!prev) return prev;
       const target = prev.mediaItems.find((m) => m.id === mediaId);
       if (!target) return prev;
+      removedUri = target.localUri;
 
       const filtered = prev.mediaItems.filter((m) => m.id !== mediaId);
       const sameSession = filtered
@@ -377,9 +422,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       });
 
       const nextState: StoreState = { ...prev, mediaItems, media: mediaItems };
-      persistState(nextState);
       return nextState;
     });
+    if (removedUri) {
+      deleteFromAppStorageIfOwned(removedUri).catch(() => {});
+    }
   };
 
   const getChildById = (childId: string) => state?.children.find((c) => c.id === childId);
@@ -392,7 +439,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     if (existing) return existing;
     const { state: nextState, character } = ensureBrainCharacterForChild(state, childId, state.characterSkins);
     setState(nextState);
-    persistState(nextState);
     return character;
   };
 
@@ -438,7 +484,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         c.id === updatedCharacter.id ? updatedCharacter : c
       );
       const nextState: StoreState = { ...withBrain, brainCharacters };
-      persistState(nextState);
       return nextState;
     });
   };
@@ -458,7 +503,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         c.id === childId ? { ...c, coins: c.coins - 10 } : c
       );
       const nextState: StoreState = { ...withBrain, children: updatedChildren, brainCharacters };
-      persistState(nextState);
       return nextState;
     });
   };
@@ -475,9 +519,18 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         c.id === updatedCharacter.id ? updatedCharacter : c
       );
       const nextState: StoreState = { ...withBrain, brainCharacters };
-      persistState(nextState);
       return nextState;
     });
+  };
+
+  const resetAllData = () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    clearPersistedState().catch(() => {});
+    const nextState = buildStoreState(createSeedState());
+    setState(nextState);
   };
 
   const value = useMemo<AppStoreContextValue>(() => {
@@ -495,7 +548,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         logTrainingSession,
         updateSessionNote,
         getMediaForSession,
-        addMediaToSession,
+        addMediaToSession: ({ type }) => ({
+          ok: false,
+          reason: type === 'photo' ? 'photo_limit' : 'video_limit',
+        }),
         removeMedia,
         getChildById,
         getActivitiesForFamily,
@@ -515,6 +571,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         setParentPin: () => {},
         resetAllData: () => {},
         isLoading,
+        isHydrating,
+        isHydrated,
         selectedChildId,
         selectChild,
         families: [],
@@ -553,8 +611,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       getUnlockedAchievementCountForChild,
       updateSettings: (partial) => updateSettingsInternal(partial, setState),
       setParentPin: (pin) => updateSettingsInternal({ parentPin: pin }, setState),
-      resetAllData: () => resetAllDataInternal(setState),
+      resetAllData,
       isLoading,
+      isHydrating,
+      isHydrated,
       selectedChildId,
       selectChild,
       families: state.families,
@@ -563,7 +623,23 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       characterSkins: state.characterSkins,
       addChild,
     };
-  }, [state, isLoading, selectedChildId]);
+  }, [state, isHydrating, selectedChildId]);
+
+  if (isHydrating) {
+    return (
+      <SafeAreaView
+        style={{
+          flex: 1,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: theme.colors.background,
+        }}
+      >
+        <ActivityIndicator size="large" color={theme.colors.primary} />
+        <Text style={{ marginTop: 12, color: theme.colors.textMain }}>Loading data...</Text>
+      </SafeAreaView>
+    );
+  }
 
   return <AppStoreContext.Provider value={value}>{children}</AppStoreContext.Provider>;
 }
@@ -574,17 +650,48 @@ export function useAppStore(): AppStoreContextValue {
   return ctx;
 }
 
-function persistState(nextState: StoreState) {
-  const { streakByChildId: _omit, ...persistable } = nextState;
-  const toSave: AppState = {
-    ...(persistable as AppState),
-    mediaItems: nextState.mediaItems,
-    media: nextState.mediaItems,
-    ownedSkins: nextState.ownedSkins,
-    settings: nextState.settings,
-    characterSkins: nextState.characterSkins,
+function buildStoreState(appState: AppState): StoreState {
+  const mediaItems = appState.mediaItems ?? appState.media ?? [];
+  return {
+    ...appState,
+    mediaItems,
+    media: mediaItems,
+    childAchievements: appState.childAchievements ?? [],
+    ownedSkins: appState.ownedSkins ?? [],
+    settings: {
+      enableMemeSkins: appState.settings?.enableMemeSkins ?? false,
+      enableGacha: appState.settings?.enableGacha ?? true,
+      parentPin: appState.settings?.parentPin,
+    },
+    characterSkins: appState.characterSkins?.length ? appState.characterSkins : CHARACTER_SKINS,
+    streakByChildId: buildStreakMap(appState.sessions ?? [], appState.children ?? []),
   };
-  saveAppState(toSave).catch(() => {});
+}
+
+function mergeWithInitialState(initial: StoreState, loaded: Partial<StoreState>): StoreState {
+  const mediaItems = loaded.mediaItems ?? loaded.media ?? initial.mediaItems;
+  const settings = {
+    ...initial.settings,
+    ...(loaded.settings ?? {}),
+  };
+  const characterSkins = loaded.characterSkins?.length ? loaded.characterSkins : initial.characterSkins;
+  const childAchievements = loaded.childAchievements ?? initial.childAchievements;
+  const ownedSkins = loaded.ownedSkins ?? initial.ownedSkins;
+  const sessions = loaded.sessions ?? initial.sessions;
+  const children = loaded.children ?? initial.children;
+  const streakByChildId = loaded.streakByChildId ?? buildStreakMap(sessions, children);
+
+  return {
+    ...initial,
+    ...loaded,
+    settings,
+    mediaItems,
+    media: mediaItems,
+    childAchievements,
+    ownedSkins,
+    characterSkins,
+    streakByChildId,
+  };
 }
 
 function getOwnedSkinsForChildInternal(state: StoreState, childId: string): CharacterSkin[] {
@@ -632,7 +739,6 @@ function purchaseSkinInternal(
     );
     const updatedOwned = [...prev.ownedSkins, { childId, skinId: skin.id }];
     const nextState: StoreState = { ...prev, children: updatedChildren, ownedSkins: updatedOwned };
-    persistState(nextState);
     result = 'ok';
     return nextState;
   });
@@ -683,7 +789,6 @@ function rollSkinGachaInternal(
     );
     const updatedOwned = isNew ? [...prev.ownedSkins, { childId: input.childId, skinId: picked.id }] : prev.ownedSkins;
     const nextState: StoreState = { ...prev, children: updatedChildren, ownedSkins: updatedOwned };
-    persistState(nextState);
 
     response = { result: 'ok', skin: picked, isNew, costCoins };
     return nextState;
@@ -720,25 +825,8 @@ function updateSettingsInternal(
     if (!prev) return prev;
     const settings = { ...prev.settings, ...partial };
     const nextState: StoreState = { ...prev, settings };
-    persistState(nextState);
     return nextState;
   });
-}
-
-function resetAllDataInternal(setState: React.Dispatch<React.SetStateAction<StoreState | null>>) {
-  const seed = createSeedState();
-  const streakByChildId = buildStreakMap(seed.sessions, seed.children);
-  const nextState: StoreState = {
-    ...seed,
-    mediaItems: seed.mediaItems ?? [],
-    media: seed.mediaItems ?? [],
-    childAchievements: seed.childAchievements ?? [],
-    ownedSkins: seed.ownedSkins ?? [],
-    settings: seed.settings,
-    streakByChildId,
-  };
-  setState(nextState);
-  persistState(nextState);
 }
 
 function ensureMapsForChildren(state: StoreState): StoreState {

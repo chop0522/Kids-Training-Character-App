@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import {
+  Alert,
   Image,
   Pressable,
   SafeAreaView,
@@ -9,19 +10,21 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { ResizeMode, Video } from 'expo-av';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useAppStore } from '../store/AppStoreContext';
 import { RootStackParamList } from '../navigation/types';
 import { theme } from '../theme';
 import { MediaType } from '../types';
 import { PrimaryButton } from '../components/PrimaryButton';
+import { captureWithCamera, pickFromLibrary, requestMediaPermissions } from '../media/mediaService';
+import { copyIntoAppStorage, deleteFromAppStorageIfOwned } from '../media/localMediaStorage';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionDetail'>;
 
 export function SessionDetailScreen({ route, navigation }: Props) {
   const { childId, sessionId } = route.params;
   const {
-    children,
     activities,
     sessions,
     streakByChildId,
@@ -76,10 +79,48 @@ export function SessionDetailScreen({ route, navigation }: Props) {
 
   const streakInfo = streakByChildId[childId];
 
-  const addPlaceholderMedia = () => {
-    const type: MediaType = photoCount < 4 ? 'photo' : 'video';
-    const uri = type === 'photo' ? 'file://placeholder-photo.jpg' : 'file://placeholder-video.mp4';
-    addMediaToSession({ sessionId, type, localUri: uri });
+  const handleMediaAction = async (source: 'camera' | 'library', type: MediaType) => {
+    const permission = await requestMediaPermissions(source);
+    if (!permission.ok) {
+      Alert.alert('権限が必要です', permission.reason ?? '権限がありません。');
+      return;
+    }
+
+    const picked =
+      source === 'camera' ? await captureWithCamera(type) : await pickFromLibrary(type);
+    if (!picked) return;
+
+    const stored = await copyIntoAppStorage({
+      sessionId,
+      type,
+      originalUri: picked.originalUri,
+      filenameHint: picked.filename,
+    });
+
+    const result = addMediaToSession({ sessionId, type, localUri: stored.storedUri });
+    if (!result.ok) {
+      const message =
+        result.reason === 'photo_limit'
+          ? '写真は1セッションにつき最大4枚までだよ'
+          : '動画は1セッションにつき最大2本までだよ';
+      Alert.alert('追加できません', message);
+      if (stored.storedUri !== picked.originalUri) {
+        deleteFromAppStorageIfOwned(stored.storedUri).catch(() => {});
+      }
+      return;
+    }
+
+    setSelectedMediaId(result.mediaId);
+  };
+
+  const handleAddMedia = () => {
+    Alert.alert('写真・動画を追加', '追加方法を選んでください', [
+      { text: '写真を撮る', onPress: () => handleMediaAction('camera', 'photo') },
+      { text: '写真を選ぶ', onPress: () => handleMediaAction('library', 'photo') },
+      { text: '動画を撮る', onPress: () => handleMediaAction('camera', 'video') },
+      { text: '動画を選ぶ', onPress: () => handleMediaAction('library', 'video') },
+      { text: 'キャンセル', style: 'cancel' },
+    ]);
   };
 
   const effortStars = '★'.repeat(session.effortLevel);
@@ -121,17 +162,19 @@ export function SessionDetailScreen({ route, navigation }: Props) {
             selectedMedia.type === 'photo' ? (
               <Image source={{ uri: selectedMedia.localUri }} style={styles.mainImage} />
             ) : (
-              <View style={styles.videoPlaceholder}>
-                <Text style={styles.videoIcon}>▶</Text>
-                <Text style={styles.videoText}>動画（プレビューは未対応）</Text>
-              </View>
+              <Video
+                source={{ uri: selectedMedia.localUri }}
+                style={styles.mainVideo}
+                useNativeControls
+                resizeMode={ResizeMode.CONTAIN}
+              />
             )
           ) : (
             <View style={styles.mainMediaPlaceholder}>
               <Text style={styles.mainMediaPlaceholderText}>まだ写真・動画がありません</Text>
             </View>
           )}
-          <PrimaryButton title="写真・動画を追加する" onPress={addPlaceholderMedia} />
+          <PrimaryButton title="写真・動画を追加する" onPress={handleAddMedia} />
           <Text style={styles.mediaLimitText}>
             写真 {photoCount}/4 · 動画 {videoCount}/2
           </Text>
@@ -289,22 +332,16 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     marginBottom: theme.spacing.sm,
   },
-  videoPlaceholder: {
+  mainVideo: {
+    width: '100%',
     height: 220,
     borderRadius: theme.radius.md,
-    backgroundColor: theme.colors.surfaceAlt,
-    alignItems: 'center',
-    justifyContent: 'center',
     marginBottom: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceAlt,
   },
   videoIcon: {
     fontSize: 24,
     color: theme.colors.textMain,
-  },
-  videoText: {
-    ...theme.typography.caption,
-    color: theme.colors.textSub,
-    marginTop: theme.spacing.xs,
   },
   mediaLimitText: {
     ...theme.typography.caption,
