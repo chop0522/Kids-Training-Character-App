@@ -12,11 +12,11 @@ import {
   View,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../navigation/types';
+import { SettingsStackParamList } from '../navigation/types';
 import { useAppStore } from '../store/AppStoreContext';
 import { theme } from '../theme';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'ParentSettings'>;
+type Props = NativeStackScreenProps<SettingsStackParamList, 'ParentSettings'>;
 
 export function ParentSettingsScreen({ navigation }: Props) {
   const { settings, updateSettings, setParentPin, resetAllData } = useAppStore();
@@ -135,6 +135,14 @@ export function ParentSettingsScreen({ navigation }: Props) {
         {isAuthorized && (
           <>
             <View style={styles.card}>
+              <Text style={styles.cardTitle}>家族共有（β）</Text>
+              <Text style={styles.cardText}>データを書き出して他の端末で読み込めます。</Text>
+              <Pressable style={styles.primaryButton} onPress={() => navigation.navigate('FamilySharing')}>
+                <Text style={styles.primaryButtonText}>家族共有を開く</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.card}>
               <Text style={styles.cardTitle}>スイッチ</Text>
               <View style={styles.toggleRow}>
                 <Text style={styles.toggleLabel}>ミームスキンを表示する</Text>
@@ -151,6 +159,12 @@ export function ParentSettingsScreen({ navigation }: Props) {
 
             <View style={styles.card}>
               <Text style={styles.cardTitle}>開発・テスト用</Text>
+              <Pressable
+                style={[styles.primaryButton, styles.debugButton]}
+                onPress={() => navigation.navigate('SkinGallery')}
+              >
+                <Text style={styles.primaryButtonText}>スキン画像チェック（デバッグ）</Text>
+              </Pressable>
               <Pressable style={[styles.primaryButton, styles.dangerButton]} onPress={handleReset}>
                 <Text style={styles.primaryButtonText}>すべてのデータをリセット</Text>
               </Pressable>
@@ -201,6 +215,11 @@ const styles = StyleSheet.create({
     color: theme.colors.textMain,
     marginBottom: theme.spacing.sm,
   },
+  cardText: {
+    ...theme.typography.body,
+    color: theme.colors.textSub,
+    marginBottom: theme.spacing.xs,
+  },
   input: {
     borderWidth: 1,
     borderColor: theme.colors.borderSoft,
@@ -220,6 +239,9 @@ const styles = StyleSheet.create({
   },
   dangerButton: {
     backgroundColor: theme.colors.danger,
+  },
+  debugButton: {
+    backgroundColor: theme.colors.accent,
   },
   primaryButtonText: {
     ...theme.typography.label,

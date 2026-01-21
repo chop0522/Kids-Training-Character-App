@@ -6,6 +6,11 @@ import {
   AppState,
   Achievement,
   AchievementKey,
+  CategoryTrainingCount,
+  BuddyActiveByChildId,
+  BuddyDiscoveredFormsByChildId,
+  BuddyProgress,
+  BuddyProgressByChildId,
   ChildAchievement,
   BrainCharacter,
   CharacterSkin,
@@ -15,6 +20,10 @@ import {
   MediaType,
   MapNode,
   OwnedSkin,
+  TreasureHistoryItem,
+  TreasureKind,
+  TreasureReward,
+  TreasureState,
   TrainingResult,
   TrainingSession,
 } from '../types';
@@ -23,14 +32,31 @@ import { applyXpToLevel, calculateCoins, calculateXp, EffortLevel, getMoodBonus 
 import { generateInitialMapForChild } from '../mapConfig';
 import { ACHIEVEMENTS, getAchievementByKey } from '../achievementsConfig';
 import { CHARACTER_SKINS, getAllSkins, getSkinById } from '../characterSkinsConfig';
+import {
+  canEvolveBuddy,
+  findEvolutionLineByFormId,
+  getBuddyForm,
+  getNextEvolutionStage,
+  getStageIndexByFormId,
+} from '../characterEvolutionConfig';
 import { createSeedState } from '../storage/seed';
 import { deleteFromAppStorageIfOwned } from '../media/localMediaStorage';
+import { warnMissingSkinAssets } from '../assets/skinAssetsValidation';
+import { createInitialTreasureState, getTreasureKind, getTreasureTargetForIndex } from '../treasureConfig';
+import { getCategoryLevelInfoFromCount } from '../categoryLevel';
+import { getLocalDateKey, getLocalDateKeyFromIso, getSessionDateKey } from '../utils/sessionUtils';
+import { normalizeTags } from '../utils/tagUtils';
 import { theme } from '../theme';
 
 export type StreakInfo = {
   current: number;
   best: number;
   lastSessionDate?: string;
+};
+
+export type AppStoreState = AppState & {
+  streakByChildId: Record<string, StreakInfo>;
+  mediaItems: Media[];
 };
 
 export type AppStore = {
@@ -44,6 +70,7 @@ export type AppStore = {
   mediaItems: Media[];
   ownedSkins: OwnedSkin[];
   settings: AppState['settings'];
+  appState: AppStoreState | null;
 
   logTrainingSession: (input: {
     childId: string;
@@ -51,8 +78,10 @@ export type AppStore = {
     durationMinutes: number;
     effortLevel: EffortLevel;
     note?: string;
+    tags?: string[];
   }) => TrainingResult | null;
   updateSessionNote: (sessionId: string, note: string) => void;
+  updateSessionTags: (sessionId: string, tags: string[]) => void;
   getMediaForSession: (sessionId: string) => Media[];
   addMediaToSession: (input: { sessionId: string; type: MediaType; localUri: string }) =>
     | { ok: true; mediaId: string }
@@ -66,17 +95,27 @@ export type AppStore = {
   petBrainCharacter: (childId: string) => void;
   feedBrainCharacter: (childId: string) => void;
   setBrainCharacterSkin: (childId: string, skinId: string) => void;
+  getActiveBuddyKeyForChild: (childId: string) => string;
+  getBuddyProgressForChild: (childId: string, buddyKey: string) => BuddyProgress | undefined;
+  setActiveBuddyForChild: (childId: string, buddyKey: string) => void;
+  evolveActiveBuddyForChild: (childId: string) => { result: 'ok'; evolvedFormId: string } | { result: 'not_ready' } | { result: 'not_found' };
+  openTreasureChest: (input: { childId: string }) =>
+    | { result: 'ok'; rewards: TreasureReward[]; kind: TreasureKind; index: number }
+    | { result: 'not_ready' }
+    | { result: 'not_found' };
   getOwnedSkinsForChild: (childId: string) => CharacterSkin[];
   purchaseSkin: (input: { childId: string; skinId: string }) =>
     | 'ok'
     | 'not_enough_coins'
     | 'already_owned'
     | 'not_found'
-    | 'not_available';
-  rollSkinGacha: (input: { childId: string }) =>
-    | { result: 'ok'; skin: CharacterSkin; isNew: boolean; costCoins: number }
-    | { result: 'not_enough_coins' }
-    | { result: 'gacha_disabled' };
+    | 'not_available'
+    | 'locked';
+  rollSkinGacha: (input: { childId: string; category: 'study' | 'exercise' }) =>
+    | { result: 'ok'; skin: CharacterSkin; isNew: boolean; duplicateCoins: number; category: 'study' | 'exercise' }
+    | { result: 'not_enough_tickets' }
+    | { result: 'gacha_disabled' }
+    | { result: 'not_available' };
   getMapNodesForChild: (childId: string) => MapNode[];
   getCurrentMapNodeForChild: (childId: string) => MapNode | undefined;
   getAchievementsForChild: (
@@ -85,6 +124,7 @@ export type AppStore = {
   getUnlockedAchievementCountForChild: (childId: string) => number;
   updateSettings: (partial: Partial<AppState['settings']>) => void;
   setParentPin: (pin: string) => void;
+  importSharedState: (incomingPartialState: Partial<AppStoreState>) => void;
   resetAllData: () => void;
 };
 
@@ -99,14 +139,52 @@ type AppStoreContextValue = AppStore & {
   addChild: (name: string) => ChildProfile | null;
 };
 
-type StoreState = AppState & {
-  streakByChildId: Record<string, StreakInfo>;
-  mediaItems: Media[];
-};
+type StoreState = AppStoreState;
 
 const AppStoreContext = createContext<AppStoreContextValue | undefined>(undefined);
 
 const SAVE_DEBOUNCE_MS = 600;
+const DEFAULT_SKIN_ID = CHARACTER_SKINS.find((s) => s.isDefault)?.id ?? CHARACTER_SKINS[0]?.id ?? 'boneca_sd_pixel_v2';
+const DEFAULT_BUDDY_KEY = DEFAULT_SKIN_ID;
+const SKIN_ID_MIGRATION_MAP: Record<string, string> = {
+  brain_default_pink: 'boneca_sd_pixel_v2',
+  brain_cool_blue: 'luliloli_sd_pixel',
+  brain_green_stamina: 'bonbal_sd_pixel',
+  monkey_banana_pixel: 'chinpanzini_sd_pixel',
+  boneca_sd_pixel_v2_evo: 'boneca_sd_pixel_v2_evo2',
+  luliloli_sd_pixel_evo: 'luliloli_sd_pixel_evo2',
+};
+const EMPTY_SKIN_WALLET: AppState['wallet'] = {
+  study: { coins: 0, tickets: 0, ticketProgress: 0, pity: 0 },
+  exercise: { coins: 0, tickets: 0, ticketProgress: 0, pity: 0 },
+};
+const EMPTY_SKIN_PROGRESS: AppState['progress'] = {
+  study: { completedCount: 0 },
+  exercise: { completedCount: 0 },
+};
+const EMPTY_CATEGORY_TRAINING_COUNT: CategoryTrainingCount = {
+  study: 0,
+  exercise: 0,
+};
+const EMPTY_BUDDY_PROGRESS: BuddyProgress = {
+  level: 1,
+  xp: 0,
+  stageIndex: 0,
+  mood: 80,
+};
+const SKIN_COINS_PER_ACTIVITY = 10;
+const SKIN_TICKET_PROGRESS_PER_TICKET = 3;
+const SKIN_GACHA_DUPLICATE_COINS_COMMON = 30;
+const SKIN_GACHA_DUPLICATE_COINS_RARE = 60;
+const SKIN_GACHA_UNLOCK_LEVEL = 2;
+const SKIN_GACHA_PITY_THRESHOLD = 10;
+const TREASURE_REWARD_BUDDY_XP_RANGE: [number, number] = [20, 50];
+const TREASURE_REWARD_COINS_SMALL: [number, number] = [80, 120];
+const TREASURE_REWARD_COINS_MEDIUM: [number, number] = [120, 180];
+const TREASURE_REWARD_COINS_LARGE: [number, number] = [150, 250];
+const TREASURE_REWARD_TICKETS_MEDIUM_CHANCE = 0.5;
+const TREASURE_REWARD_TICKETS_MEDIUM_AMOUNT = 1;
+const TREASURE_REWARD_TICKETS_LARGE_AMOUNT = 1;
 
 export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<StoreState | null>(null);
@@ -116,6 +194,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const isHydrated = !isHydrating;
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasHydratedRef = useRef(false);
+  const hasWarnedSkinAssetsRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,6 +242,12 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     };
   }, [state, isHydrating]);
 
+  useEffect(() => {
+    if (!__DEV__ || isHydrating || !state || hasWarnedSkinAssetsRef.current) return;
+    hasWarnedSkinAssetsRef.current = true;
+    warnMissingSkinAssets(state.settings.enableMemeSkins);
+  }, [isHydrating, state]);
+
   const selectChild = (id: string) => setSelectedChildId(id);
 
   const addChild = (name: string): ChildProfile | null => {
@@ -183,7 +268,9 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
     const newMapNodes = generateInitialMapForChild(newChild.id);
 
-    const defaultSkinId = state.characterSkins.find((s) => s.isDefault)?.id ?? state.characterSkins[0]?.id ?? 'default';
+    const defaultSkins = state.characterSkins.filter((skin) => skin.unlockMethod === 'default');
+    const defaultSkinId =
+      defaultSkins.find((s) => s.isDefault)?.id ?? defaultSkins[0]?.id ?? state.characterSkins[0]?.id ?? DEFAULT_SKIN_ID;
     const newBrain: BrainCharacter = {
       id: nanoid(8),
       childId: newChild.id,
@@ -193,14 +280,35 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       skinId: defaultSkinId,
       createdAt: new Date().toISOString(),
     };
-    const newOwnedSkin: OwnedSkin | null = defaultSkinId ? { childId: newChild.id, skinId: defaultSkinId } : null;
+    const newOwnedSkins: OwnedSkin[] = defaultSkins.length
+      ? defaultSkins.map((skin) => ({ childId: newChild.id, skinId: skin.id }))
+      : defaultSkinId
+        ? [{ childId: newChild.id, skinId: defaultSkinId }]
+        : [];
+    const newBuddyProgress = newOwnedSkins.reduce<Record<string, BuddyProgress>>((acc, owned) => {
+      acc[owned.skinId] = buildDefaultBuddyProgress();
+      return acc;
+    }, {});
+    const discoveredForms = newOwnedSkins.map((owned) => getBuddyForm(owned.skinId, 0).formId);
 
     const updatedState: StoreState = {
       ...state,
       children: [...state.children, newChild],
       mapNodes: [...state.mapNodes, ...newMapNodes],
       brainCharacters: [...state.brainCharacters, newBrain],
-      ownedSkins: newOwnedSkin ? [...state.ownedSkins, newOwnedSkin] : state.ownedSkins,
+      ownedSkins: newOwnedSkins.length ? [...state.ownedSkins, ...newOwnedSkins] : state.ownedSkins,
+      activeBuddyKeyByChildId: {
+        ...state.activeBuddyKeyByChildId,
+        [newChild.id]: defaultSkinId,
+      },
+      buddyProgressByChildId: {
+        ...state.buddyProgressByChildId,
+        [newChild.id]: newBuddyProgress,
+      },
+      discoveredFormIdsByChildId: {
+        ...state.discoveredFormIdsByChildId,
+        [newChild.id]: discoveredForms,
+      },
       streakByChildId: {
         ...state.streakByChildId,
         [newChild.id]: { current: 0, best: 0, lastSessionDate: undefined },
@@ -218,6 +326,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     durationMinutes: number;
     effortLevel: EffortLevel;
     note?: string;
+    tags?: string[];
   }): TrainingResult | null => {
     let result: TrainingResult | null = null;
     setState((prev) => {
@@ -225,25 +334,88 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       const { childId, activityId, durationMinutes, effortLevel, note } = input;
       const now = new Date();
       const dateTimeIso = now.toISOString();
-      const todayDate = dateTimeIso.slice(0, 10);
+      const todayDate = getLocalDateKey(now);
 
-      const brainBefore = prev.brainCharacters.find((b) => b.childId === childId);
-      const moodBefore = brainBefore ? brainBefore.mood : 50;
+      const activeBuddyKey = getActiveBuddyKey(prev, childId);
+      const buddyBefore = getBuddyProgress(prev, childId, activeBuddyKey);
+      const moodBefore = buddyBefore.mood ?? 50;
       const baseXp = calculateXp(durationMinutes, effortLevel);
       const baseCoins = calculateCoins(durationMinutes, effortLevel);
       const moodBonus = getMoodBonus(moodBefore);
       const xpGained = Math.floor(baseXp * moodBonus.xpMultiplier);
       const coinsGained = baseCoins + moodBonus.extraCoins;
+      const activity = prev.activities.find((a) => a.id === activityId);
+      const skinCategory = getSkinCategoryForActivity(activity);
+      const prevWallet = normalizeWallet(prev.wallet);
+      const prevProgress = normalizeProgress(prev.progress);
+      const prevCategoryTrainingCount = normalizeCategoryTrainingCount(prev.categoryTrainingCount);
+      const walletCategory = prevWallet[skinCategory];
+      const nextTicketProgress = walletCategory.ticketProgress + 1;
+      const ticketsGained = Math.floor(nextTicketProgress / SKIN_TICKET_PROGRESS_PER_TICKET);
+      const updatedWalletCategory = {
+        ...walletCategory,
+        coins: walletCategory.coins + SKIN_COINS_PER_ACTIVITY,
+        tickets: walletCategory.tickets + ticketsGained,
+        ticketProgress: nextTicketProgress % SKIN_TICKET_PROGRESS_PER_TICKET,
+      };
+      const wallet = { ...prevWallet, [skinCategory]: updatedWalletCategory };
+      const progress = {
+        ...prevProgress,
+        [skinCategory]: {
+          completedCount: (prevProgress[skinCategory]?.completedCount ?? 0) + 1,
+        },
+      };
+      const categoryTrainingCount = {
+        ...prevCategoryTrainingCount,
+        [skinCategory]: (prevCategoryTrainingCount[skinCategory] ?? 0) + 1,
+      };
+      const treasure = normalizeTreasure(prev.treasure);
+      const updatedTreasure: TreasureState = {
+        ...treasure,
+        progress: treasure.progress + 1,
+      };
+      const buddyBeforeLevel = buddyBefore.level;
+      const buddyUpdated = applyXpToLevel(buddyBefore.level, buddyBefore.xp, xpGained);
+      const updatedBuddyProgress: BuddyProgress = {
+        ...buddyBefore,
+        level: buddyUpdated.level,
+        xp: buddyUpdated.xp,
+        mood: Math.min(100, buddyBefore.mood + 10),
+      };
+      const buddyLevelUps = Math.max(0, buddyUpdated.level - buddyBeforeLevel);
+      const prevBuddyProgressByChildId = prev.buddyProgressByChildId ?? {};
+      const prevChildBuddyProgress = prevBuddyProgressByChildId[childId] ?? {};
+      const buddyProgressByChildId = {
+        ...prevBuddyProgressByChildId,
+        [childId]: {
+          ...prevChildBuddyProgress,
+          [activeBuddyKey]: updatedBuddyProgress,
+        },
+      };
+      const activeBuddyKeyByChildId = {
+        ...prev.activeBuddyKeyByChildId,
+        [childId]: activeBuddyKey,
+      };
+      const discoveredSet = new Set(prev.discoveredFormIdsByChildId?.[childId] ?? []);
+      const currentForm = getBuddyForm(activeBuddyKey, updatedBuddyProgress.stageIndex);
+      discoveredSet.add(currentForm.formId);
+      const discoveredFormIdsByChildId = {
+        ...prev.discoveredFormIdsByChildId,
+        [childId]: Array.from(discoveredSet),
+      };
 
+      const sessionTags = normalizeTags(input.tags);
       const newSession: TrainingSession = {
         id: String(Date.now()),
         childId,
         activityId,
         date: dateTimeIso,
+        dateKey: todayDate,
         durationMinutes,
         effortLevel,
         xpGained,
         coinsGained,
+        tags: sessionTags,
         note,
       };
 
@@ -270,11 +442,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
       const updatedChildren = prev.children.map((child) => {
         if (child.id !== childId) return child;
-        const { level, xp } = applyXpToLevel(child.level, child.xp, xpGained);
         return {
           ...child,
-          level,
-          xp,
+          level: updatedBuddyProgress.level,
+          xp: updatedBuddyProgress.xp,
           coins: child.coins + coinsGained,
           totalMinutes: child.totalMinutes + durationMinutes,
           currentStreak: newCurrent,
@@ -282,25 +453,31 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         };
       });
 
-      const prevLevel = prev.children.find((c) => c.id === childId)?.level ?? 0;
-
       let nextState: StoreState = {
         ...prev,
         children: updatedChildren,
         sessions,
         streakByChildId,
+        wallet,
+        progress,
+        categoryTrainingCount,
+        treasure: updatedTreasure,
+        lastActivityCategory: skinCategory,
+        activeBuddyKeyByChildId,
+        buddyProgressByChildId,
+        discoveredFormIdsByChildId,
       };
 
       nextState = ensureMapForChild(nextState, childId);
 
-      const updatedChild = nextState.children.find((c) => c.id === childId);
-      const { state: withBrain, character } = ensureBrainCharacterForChild(nextState, childId, prev.characterSkins);
+      const { state: withBrain, character } = ensureBrainCharacterForChild(nextState, childId);
 
       const updatedCharacter: BrainCharacter = {
         ...character,
-        level: updatedChild?.level ?? character.level,
-        xp: updatedChild?.xp ?? character.xp,
-        mood: Math.min(100, character.mood + 10),
+        level: updatedBuddyProgress.level,
+        xp: updatedBuddyProgress.xp,
+        mood: updatedBuddyProgress.mood,
+        skinId: activeBuddyKey,
       };
 
       nextState = {
@@ -313,23 +490,18 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       const mapResult = applyTrainingToMap(nextState, childId, xpGained, coinsGained);
       nextState = mapResult.state;
 
-      const childAfterMap = nextState.children.find((c) => c.id === childId);
-      if (childAfterMap) {
-        const syncedBrains = nextState.brainCharacters.map((brain) =>
-          brain.childId === childId ? { ...brain, level: childAfterMap.level, xp: childAfterMap.xp } : brain
-        );
-        nextState = { ...nextState, brainCharacters: syncedBrains };
-      }
-
       const achievementResult = checkAndUnlockAchievementsForChild(nextState, childId);
       nextState = achievementResult.state;
 
-      const newLevel = nextState.children.find((c) => c.id === childId)?.level ?? prevLevel;
-      const levelUps = Math.max(0, newLevel - prevLevel);
-
       result = {
         sessionId: newSession.id,
-        levelUps,
+        buddyLevelUps,
+        buddyXpGained: xpGained,
+        skinCategory,
+        skinCoinsGained: SKIN_COINS_PER_ACTIVITY,
+        ticketsGained,
+        ticketProgress: updatedWalletCategory.ticketProgress,
+        ticketProgressMax: SKIN_TICKET_PROGRESS_PER_TICKET,
         completedNodes: mapResult.completedNodes,
         unlockedAchievements: achievementResult.newlyUnlocked,
       };
@@ -343,6 +515,16 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setState((prev) => {
       if (!prev) return prev;
       const sessions = prev.sessions.map((s) => (s.id === sessionId ? { ...s, note } : s));
+      const nextState: StoreState = { ...prev, sessions };
+      return nextState;
+    });
+  };
+
+  const updateSessionTags = (sessionId: string, tags: string[]) => {
+    const normalized = normalizeTags(tags);
+    setState((prev) => {
+      if (!prev) return prev;
+      const sessions = prev.sessions.map((s) => (s.id === sessionId ? { ...s, tags: normalized } : s));
       const nextState: StoreState = { ...prev, sessions };
       return nextState;
     });
@@ -437,7 +619,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     if (!state) return undefined;
     const existing = state.brainCharacters.find((c) => c.childId === childId);
     if (existing) return existing;
-    const { state: nextState, character } = ensureBrainCharacterForChild(state, childId, state.characterSkins);
+    const { state: nextState, character } = ensureBrainCharacterForChild(state, childId);
     setState(nextState);
     return character;
   };
@@ -478,12 +660,36 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const petBrainCharacter = (childId: string) => {
     setState((prev) => {
       if (!prev) return prev;
-      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId, prev.characterSkins);
-      const updatedCharacter: BrainCharacter = { ...character, mood: Math.min(100, character.mood + 5) };
+      const activeBuddyKey = getActiveBuddyKey(prev, childId);
+      const progress = getBuddyProgress(prev, childId, activeBuddyKey);
+      const updatedProgress = { ...progress, mood: Math.min(100, progress.mood + 5) };
+      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId);
+      const updatedCharacter: BrainCharacter = {
+        ...character,
+        level: updatedProgress.level,
+        xp: updatedProgress.xp,
+        mood: updatedProgress.mood,
+        skinId: activeBuddyKey,
+      };
       const brainCharacters = withBrain.brainCharacters.map((c) =>
         c.id === updatedCharacter.id ? updatedCharacter : c
       );
-      const nextState: StoreState = { ...withBrain, brainCharacters };
+      const buddyProgressByChildId = {
+        ...withBrain.buddyProgressByChildId,
+        [childId]: {
+          ...(withBrain.buddyProgressByChildId[childId] ?? {}),
+          [activeBuddyKey]: updatedProgress,
+        },
+      };
+      const nextState: StoreState = {
+        ...withBrain,
+        brainCharacters,
+        buddyProgressByChildId,
+        activeBuddyKeyByChildId: {
+          ...withBrain.activeBuddyKeyByChildId,
+          [childId]: activeBuddyKey,
+        },
+      };
       return nextState;
     });
   };
@@ -494,15 +700,40 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       const child = prev.children.find((c) => c.id === childId);
       if (!child || child.coins < 10) return prev;
 
-      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId, prev.characterSkins);
-      const updatedCharacter: BrainCharacter = { ...character, mood: Math.min(100, character.mood + 20) };
+      const activeBuddyKey = getActiveBuddyKey(prev, childId);
+      const progress = getBuddyProgress(prev, childId, activeBuddyKey);
+      const updatedProgress = { ...progress, mood: Math.min(100, progress.mood + 20) };
+      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId);
+      const updatedCharacter: BrainCharacter = {
+        ...character,
+        level: updatedProgress.level,
+        xp: updatedProgress.xp,
+        mood: updatedProgress.mood,
+        skinId: activeBuddyKey,
+      };
       const brainCharacters = withBrain.brainCharacters.map((c) =>
         c.id === updatedCharacter.id ? updatedCharacter : c
       );
       const updatedChildren = withBrain.children.map((c) =>
         c.id === childId ? { ...c, coins: c.coins - 10 } : c
       );
-      const nextState: StoreState = { ...withBrain, children: updatedChildren, brainCharacters };
+      const buddyProgressByChildId = {
+        ...withBrain.buddyProgressByChildId,
+        [childId]: {
+          ...(withBrain.buddyProgressByChildId[childId] ?? {}),
+          [activeBuddyKey]: updatedProgress,
+        },
+      };
+      const nextState: StoreState = {
+        ...withBrain,
+        children: updatedChildren,
+        brainCharacters,
+        buddyProgressByChildId,
+        activeBuddyKeyByChildId: {
+          ...withBrain.activeBuddyKeyByChildId,
+          [childId]: activeBuddyKey,
+        },
+      };
       return nextState;
     });
   };
@@ -513,14 +744,248 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       const owned = getOwnedSkinsForChildInternal(prev, childId);
       const allowed = owned.some((s) => s.id === skinId);
       if (!allowed) return prev;
-      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId, prev.characterSkins);
-      const updatedCharacter: BrainCharacter = { ...character, skinId };
+      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId);
+      const prevChildProgress = withBrain.buddyProgressByChildId[childId] ?? {};
+      const stageIndex = getStageIndexByFormId(skinId) ?? 0;
+      const progress = prevChildProgress[skinId] ?? buildDefaultBuddyProgress({ stageIndex });
+      const updatedCharacter: BrainCharacter = {
+        ...character,
+        level: progress.level,
+        xp: progress.xp,
+        mood: progress.mood,
+        skinId,
+      };
       const brainCharacters = withBrain.brainCharacters.map((c) =>
         c.id === updatedCharacter.id ? updatedCharacter : c
       );
-      const nextState: StoreState = { ...withBrain, brainCharacters };
+      const buddyProgressByChildId = {
+        ...withBrain.buddyProgressByChildId,
+        [childId]: {
+          ...prevChildProgress,
+          [skinId]: progress,
+        },
+      };
+      const discoveredSet = new Set(withBrain.discoveredFormIdsByChildId?.[childId] ?? []);
+      const line = findEvolutionLineByFormId(skinId);
+      const currentForm = getBuddyForm(skinId, progress.stageIndex);
+      if (line) {
+        const baseFormId = line.stages[0]?.formId;
+        if (baseFormId) discoveredSet.add(baseFormId);
+      }
+      discoveredSet.add(currentForm.formId);
+      const discoveredFormIdsByChildId = {
+        ...withBrain.discoveredFormIdsByChildId,
+        [childId]: Array.from(discoveredSet),
+      };
+      const nextState: StoreState = {
+        ...withBrain,
+        brainCharacters,
+        buddyProgressByChildId,
+        activeBuddyKeyByChildId: {
+          ...withBrain.activeBuddyKeyByChildId,
+          [childId]: skinId,
+        },
+        discoveredFormIdsByChildId,
+      };
       return nextState;
     });
+  };
+
+  const getActiveBuddyKeyForChild = (childId: string) => {
+    if (!state) return DEFAULT_BUDDY_KEY;
+    return getActiveBuddyKey(state, childId);
+  };
+
+  const getBuddyProgressForChild = (childId: string, buddyKey: string) => {
+    if (!state) return undefined;
+    return getBuddyProgress(state, childId, buddyKey);
+  };
+
+  const setActiveBuddyForChild = (childId: string, buddyKey: string) => {
+    setBrainCharacterSkin(childId, buddyKey);
+  };
+
+  const evolveActiveBuddyForChild = (childId: string) => {
+    let response:
+      | { result: 'ok'; evolvedFormId: string }
+      | { result: 'not_ready' }
+      | { result: 'not_found' } = { result: 'not_found' };
+    setState((prev) => {
+      if (!prev) return prev;
+      const activeBuddyKey = getActiveBuddyKey(prev, childId);
+      const progress = getBuddyProgress(prev, childId, activeBuddyKey);
+      const nextStage = getNextEvolutionStage(activeBuddyKey, progress);
+      if (!nextStage) {
+        response = { result: 'not_found' };
+        return prev;
+      }
+      if (!canEvolveBuddy(activeBuddyKey, progress)) {
+        response = { result: 'not_ready' };
+        return prev;
+      }
+      const fromFormId = activeBuddyKey;
+      const toFormId = nextStage.formId;
+      const updatedProgress: BuddyProgress = {
+        ...progress,
+        stageIndex: nextStage.stageIndex,
+      };
+      const prevChildProgress = prev.buddyProgressByChildId[childId] ?? {};
+      const { [fromFormId]: _, ...restProgress } = prevChildProgress;
+      const buddyProgressByChildId = {
+        ...prev.buddyProgressByChildId,
+        [childId]: {
+          ...restProgress,
+          [toFormId]: updatedProgress,
+        },
+      };
+      const ownedSkins = prev.ownedSkins.filter(
+        (owned) => !(owned.childId === childId && owned.skinId === fromFormId)
+      );
+      const hasEvolved = ownedSkins.some((owned) => owned.childId === childId && owned.skinId === toFormId);
+      const nextOwnedSkins = hasEvolved ? ownedSkins : [...ownedSkins, { childId, skinId: toFormId }];
+      const discoveredSet = new Set(prev.discoveredFormIdsByChildId?.[childId] ?? []);
+      discoveredSet.add(fromFormId);
+      discoveredSet.add(toFormId);
+      const discoveredFormIdsByChildId = {
+        ...prev.discoveredFormIdsByChildId,
+        [childId]: Array.from(discoveredSet),
+      };
+      const { state: withBrain, character } = ensureBrainCharacterForChild(prev, childId);
+      const updatedCharacter: BrainCharacter = {
+        ...character,
+        level: updatedProgress.level,
+        xp: updatedProgress.xp,
+        mood: updatedProgress.mood,
+        skinId: toFormId,
+      };
+      const brainCharacters = withBrain.brainCharacters.map((c) =>
+        c.id === updatedCharacter.id ? updatedCharacter : c
+      );
+      response = { result: 'ok', evolvedFormId: toFormId };
+      return {
+        ...withBrain,
+        brainCharacters,
+        buddyProgressByChildId,
+        ownedSkins: nextOwnedSkins,
+        discoveredFormIdsByChildId,
+        activeBuddyKeyByChildId: {
+          ...withBrain.activeBuddyKeyByChildId,
+          [childId]: toFormId,
+        },
+      };
+    });
+    return response;
+  };
+
+  const openTreasureChest = (input: { childId: string }) => {
+    let response:
+      | { result: 'ok'; rewards: TreasureReward[]; kind: TreasureKind; index: number }
+      | { result: 'not_ready' }
+      | { result: 'not_found' } = { result: 'not_found' };
+    setState((prev) => {
+      if (!prev) return prev;
+      const child = prev.children.find((c) => c.id === input.childId);
+      if (!child) {
+        response = { result: 'not_found' };
+        return prev;
+      }
+      const treasure = normalizeTreasure(prev.treasure);
+      if (treasure.progress < treasure.target) {
+        response = { result: 'not_ready' };
+        return prev;
+      }
+      const kind = getTreasureKind(treasure.chestIndex);
+      const category = prev.lastActivityCategory ?? 'study';
+      const { rewards, coins, tickets, buddyXp } = rollTreasureRewards(kind, category);
+      const historyItem: TreasureHistoryItem = {
+        index: treasure.chestIndex,
+        openedAtISO: new Date().toISOString(),
+        kind,
+        rewards,
+      };
+      const nextTreasure: TreasureState = {
+        chestIndex: treasure.chestIndex + 1,
+        progress: Math.max(0, treasure.progress - treasure.target),
+        target: getTreasureTargetForIndex(treasure.chestIndex + 1),
+        history: [historyItem, ...treasure.history],
+      };
+      const wallet = normalizeWallet(prev.wallet);
+      const walletCategory = wallet[category];
+      const updatedWallet = {
+        ...wallet,
+        [category]: {
+          ...walletCategory,
+          coins: walletCategory.coins + coins,
+          tickets: walletCategory.tickets + tickets,
+        },
+      };
+      const activeBuddyKey = getActiveBuddyKey(prev, input.childId);
+      const prevBuddyProgress = getBuddyProgress(prev, input.childId, activeBuddyKey);
+      const buddyUpdated = applyXpToLevel(prevBuddyProgress.level, prevBuddyProgress.xp, buddyXp);
+      const updatedBuddyProgress: BuddyProgress = {
+        ...prevBuddyProgress,
+        level: buddyUpdated.level,
+        xp: buddyUpdated.xp,
+      };
+      const buddyProgressByChildId = {
+        ...prev.buddyProgressByChildId,
+        [input.childId]: {
+          ...(prev.buddyProgressByChildId[input.childId] ?? {}),
+          [activeBuddyKey]: updatedBuddyProgress,
+        },
+      };
+      const activeBuddyKeyByChildId = {
+        ...prev.activeBuddyKeyByChildId,
+        [input.childId]: activeBuddyKey,
+      };
+      const children = prev.children.map((c) => {
+        if (c.id !== input.childId) return c;
+        return {
+          ...c,
+          level: updatedBuddyProgress.level,
+          xp: updatedBuddyProgress.xp,
+        };
+      });
+      const brainCharacters = prev.brainCharacters.map((brain) => {
+        if (brain.childId !== input.childId) return brain;
+        return {
+          ...brain,
+          level: updatedBuddyProgress.level,
+          xp: updatedBuddyProgress.xp,
+          mood: updatedBuddyProgress.mood,
+          skinId: activeBuddyKey,
+        };
+      });
+      response = { result: 'ok', rewards, kind, index: treasure.chestIndex };
+      return {
+        ...prev,
+        treasure: nextTreasure,
+        wallet: updatedWallet,
+        buddyProgressByChildId,
+        activeBuddyKeyByChildId,
+        children,
+        brainCharacters,
+      };
+    });
+    return response;
+  };
+
+  const importSharedState = (incomingPartialState: Partial<AppStoreState>) => {
+    if (!state) return;
+    const currentPin = state.settings?.parentPin;
+    const initialState = buildStoreState(createSeedState());
+    let merged = mergeWithInitialState(initialState, incomingPartialState as Partial<StoreState>);
+    merged = ensureMapsForChildren(merged);
+    const nextState: StoreState = {
+      ...merged,
+      settings: {
+        ...merged.settings,
+        parentPin: currentPin ?? merged.settings?.parentPin,
+      },
+    };
+    setState(nextState);
+    setSelectedChildId(nextState.children[0]?.id ?? null);
+    savePersistedState(nextState).catch(() => {});
   };
 
   const resetAllData = () => {
@@ -545,8 +1010,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         mediaItems: [],
         ownedSkins: [],
         settings: { enableMemeSkins: false, enableGacha: true, parentPin: undefined },
+        appState: null,
         logTrainingSession,
         updateSessionNote,
+        updateSessionTags,
         getMediaForSession,
         addMediaToSession: ({ type }) => ({
           ok: false,
@@ -560,6 +1027,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         petBrainCharacter,
         feedBrainCharacter,
         setBrainCharacterSkin,
+        getActiveBuddyKeyForChild: () => DEFAULT_BUDDY_KEY,
+        getBuddyProgressForChild: () => undefined,
+        setActiveBuddyForChild: () => {},
+        evolveActiveBuddyForChild: () => ({ result: 'not_found' }),
+        openTreasureChest: (_input) => ({ result: 'not_found' }),
         getOwnedSkinsForChild: () => [],
         purchaseSkin: () => 'not_found',
         rollSkinGacha: () => ({ result: 'gacha_disabled' }),
@@ -569,6 +1041,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         getUnlockedAchievementCountForChild,
         updateSettings: () => {},
         setParentPin: () => {},
+        importSharedState: () => {},
         resetAllData: () => {},
         isLoading,
         isHydrating,
@@ -590,8 +1063,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       mediaItems: state.mediaItems,
       ownedSkins: state.ownedSkins,
       settings: state.settings,
+      appState: state,
       logTrainingSession,
       updateSessionNote,
+      updateSessionTags,
       getMediaForSession,
       addMediaToSession,
       removeMedia,
@@ -602,6 +1077,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       petBrainCharacter,
       feedBrainCharacter,
       setBrainCharacterSkin,
+      getActiveBuddyKeyForChild,
+      getBuddyProgressForChild,
+      setActiveBuddyForChild,
+      evolveActiveBuddyForChild,
+      openTreasureChest,
       getOwnedSkinsForChild: (childId: string) => getOwnedSkinsForChildInternal(state, childId),
       purchaseSkin: (input) => purchaseSkinInternal(input, setState),
       rollSkinGacha: (input) => rollSkinGachaInternal(input, setState),
@@ -611,6 +1091,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       getUnlockedAchievementCountForChild,
       updateSettings: (partial) => updateSettingsInternal(partial, setState),
       setParentPin: (pin) => updateSettingsInternal({ parentPin: pin }, setState),
+      importSharedState,
       resetAllData,
       isLoading,
       isHydrating,
@@ -652,10 +1133,30 @@ export function useAppStore(): AppStoreContextValue {
 
 function buildStoreState(appState: AppState): StoreState {
   const mediaItems = appState.mediaItems ?? appState.media ?? [];
-  return {
+  const sessions = normalizeSessions(appState.sessions ?? []);
+  const buddyState = normalizeBuddyState({
+    activeBuddyKeyByChildId: appState.activeBuddyKeyByChildId,
+    buddyProgressByChildId: appState.buddyProgressByChildId,
+    discoveredFormIdsByChildId: appState.discoveredFormIdsByChildId,
+    brainCharacters: appState.brainCharacters,
+    children: appState.children ?? [],
+    ownedSkins: appState.ownedSkins ?? [],
+  });
+  const fallbackCounts =
+    appState.categoryTrainingCount ??
+    (appState.progress
+      ? {
+          study: appState.progress.study?.completedCount ?? 0,
+          exercise: appState.progress.exercise?.completedCount ?? 0,
+        }
+      : undefined) ??
+    buildCategoryTrainingCountFromSessions(sessions, appState.activities ?? []);
+  const categoryTrainingCount = normalizeCategoryTrainingCount(fallbackCounts);
+  const built: StoreState = {
     ...appState,
     mediaItems,
     media: mediaItems,
+    sessions,
     childAchievements: appState.childAchievements ?? [],
     ownedSkins: appState.ownedSkins ?? [],
     settings: {
@@ -663,149 +1164,473 @@ function buildStoreState(appState: AppState): StoreState {
       enableGacha: appState.settings?.enableGacha ?? true,
       parentPin: appState.settings?.parentPin,
     },
-    characterSkins: appState.characterSkins?.length ? appState.characterSkins : CHARACTER_SKINS,
-    streakByChildId: buildStreakMap(appState.sessions ?? [], appState.children ?? []),
+    characterSkins: CHARACTER_SKINS,
+    wallet: normalizeWallet(appState.wallet),
+    progress: normalizeProgress(appState.progress),
+    categoryTrainingCount,
+    activeBuddyKeyByChildId: buddyState.activeBuddyKeyByChildId,
+    buddyProgressByChildId: buddyState.buddyProgressByChildId,
+    discoveredFormIdsByChildId: buddyState.discoveredFormIdsByChildId,
+    treasure: normalizeTreasure(appState.treasure),
+    lastActivityCategory: appState.lastActivityCategory ?? 'study',
+    openedTreasureNodeIds: normalizeOpenedTreasureNodeIds(appState.openedTreasureNodeIds),
+    streakByChildId: buildStreakMap(sessions, appState.children ?? []),
+  };
+  return {
+    ...built,
+    brainCharacters: syncBrainCharactersWithBuddy(built),
   };
 }
 
 function mergeWithInitialState(initial: StoreState, loaded: Partial<StoreState>): StoreState {
-  const mediaItems = loaded.mediaItems ?? loaded.media ?? initial.mediaItems;
+  const migrated = migrateSkinState(loaded);
+  const mediaItems = migrated.mediaItems ?? migrated.media ?? initial.mediaItems;
   const settings = {
     ...initial.settings,
-    ...(loaded.settings ?? {}),
+    ...(migrated.settings ?? {}),
   };
-  const characterSkins = loaded.characterSkins?.length ? loaded.characterSkins : initial.characterSkins;
-  const childAchievements = loaded.childAchievements ?? initial.childAchievements;
-  const ownedSkins = loaded.ownedSkins ?? initial.ownedSkins;
-  const sessions = loaded.sessions ?? initial.sessions;
-  const children = loaded.children ?? initial.children;
-  const streakByChildId = loaded.streakByChildId ?? buildStreakMap(sessions, children);
+  const characterSkins = initial.characterSkins;
+  const childAchievements = migrated.childAchievements ?? initial.childAchievements;
+  const sessions = normalizeSessions(migrated.sessions ?? initial.sessions);
+  const children = migrated.children ?? initial.children;
+  const ownedSkins = ensureDefaultOwnedSkins(migrated.ownedSkins ?? initial.ownedSkins, children);
+  const streakByChildId = migrated.streakByChildId ?? buildStreakMap(sessions, children);
+  const wallet = normalizeWallet(migrated.wallet ?? initial.wallet);
+  const progress = normalizeProgress(migrated.progress ?? initial.progress);
+  const fallbackCounts =
+    migrated.categoryTrainingCount ??
+    (migrated.progress
+      ? {
+          study: migrated.progress.study?.completedCount ?? 0,
+          exercise: migrated.progress.exercise?.completedCount ?? 0,
+        }
+      : undefined) ??
+    buildCategoryTrainingCountFromSessions(sessions, migrated.activities ?? initial.activities);
+  const categoryTrainingCount = normalizeCategoryTrainingCount(fallbackCounts);
+  const buddyState = normalizeBuddyState({
+    activeBuddyKeyByChildId: migrated.activeBuddyKeyByChildId ?? initial.activeBuddyKeyByChildId,
+    buddyProgressByChildId: migrated.buddyProgressByChildId ?? initial.buddyProgressByChildId,
+    discoveredFormIdsByChildId: migrated.discoveredFormIdsByChildId ?? initial.discoveredFormIdsByChildId,
+    brainCharacters: migrated.brainCharacters ?? initial.brainCharacters,
+    children,
+    ownedSkins,
+  });
+  const treasure = normalizeTreasure(migrated.treasure ?? initial.treasure);
+  const lastActivityCategory = migrated.lastActivityCategory ?? initial.lastActivityCategory ?? 'study';
+  const openedTreasureNodeIds = normalizeOpenedTreasureNodeIds(
+    migrated.openedTreasureNodeIds ?? initial.openedTreasureNodeIds
+  );
 
-  return {
+  const merged: StoreState = {
     ...initial,
-    ...loaded,
+    ...migrated,
     settings,
     mediaItems,
     media: mediaItems,
     childAchievements,
+    sessions,
     ownedSkins,
     characterSkins,
+    wallet,
+    progress,
+    categoryTrainingCount,
+    activeBuddyKeyByChildId: buddyState.activeBuddyKeyByChildId,
+    buddyProgressByChildId: buddyState.buddyProgressByChildId,
+    discoveredFormIdsByChildId: buddyState.discoveredFormIdsByChildId,
+    treasure,
+    lastActivityCategory,
+    openedTreasureNodeIds,
     streakByChildId,
   };
-}
-
-function getOwnedSkinsForChildInternal(state: StoreState, childId: string): CharacterSkin[] {
-  const includeMeme = state.settings.enableMemeSkins;
-  const all = getAllSkins(includeMeme);
-  const ownedSet = new Set(
-    state.ownedSkins.filter((o) => o.childId === childId).map((o) => o.skinId)
-  );
-  return all.filter((skin) => skin.isDefault || ownedSet.has(skin.id));
-}
-
-function purchaseSkinInternal(
-  input: { childId: string; skinId: string },
-  setState: React.Dispatch<React.SetStateAction<StoreState | null>>
-): 'ok' | 'not_enough_coins' | 'already_owned' | 'not_found' | 'not_available' {
-  const { childId, skinId } = input;
-  let result: 'ok' | 'not_enough_coins' | 'already_owned' | 'not_found' | 'not_available' = 'not_found';
-  setState((prev) => {
-    if (!prev) return prev;
-    const skin = getSkinById(skinId);
-    if (!skin) {
-      result = 'not_found';
-      return prev;
-    }
-    if (!(skin.availableIn === 'shop' || skin.availableIn === 'both') || skin.priceCoins === undefined) {
-      result = 'not_available';
-      return prev;
-    }
-    const owned = getOwnedSkinsForChildInternal(prev, childId);
-    if (owned.some((s) => s.id === skin.id)) {
-      result = 'already_owned';
-      return prev;
-    }
-    const child = prev.children.find((c) => c.id === childId);
-    if (!child) {
-      result = 'not_found';
-      return prev;
-    }
-    if (child.coins < skin.priceCoins) {
-      result = 'not_enough_coins';
-      return prev;
-    }
-    const updatedChildren = prev.children.map((c) =>
-      c.id === childId ? { ...c, coins: c.coins - (skin.priceCoins ?? 0) } : c
-    );
-    const updatedOwned = [...prev.ownedSkins, { childId, skinId: skin.id }];
-    const nextState: StoreState = { ...prev, children: updatedChildren, ownedSkins: updatedOwned };
-    result = 'ok';
-    return nextState;
-  });
-  return result;
-}
-
-function rollSkinGachaInternal(
-  input: { childId: string },
-  setState: React.Dispatch<React.SetStateAction<StoreState | null>>
-):
-  | { result: 'ok'; skin: CharacterSkin; isNew: boolean; costCoins: number }
-  | { result: 'not_enough_coins' }
-  | { result: 'gacha_disabled' } {
-  const costCoins = 30;
-  let response: { result: 'ok'; skin: CharacterSkin; isNew: boolean; costCoins: number } | { result: 'not_enough_coins' } | { result: 'gacha_disabled' } =
-    { result: 'gacha_disabled' };
-
-  setState((prev) => {
-    if (!prev) return prev;
-    if (!prev.settings.enableGacha) {
-      response = { result: 'gacha_disabled' };
-      return prev;
-    }
-    const child = prev.children.find((c) => c.id === input.childId);
-    if (!child) {
-      response = { result: 'not_enough_coins' };
-      return prev;
-    }
-    if (child.coins < costCoins) {
-      response = { result: 'not_enough_coins' };
-      return prev;
-    }
-    const pool = getAllSkins(prev.settings.enableMemeSkins).filter(
-      (s) => s.availableIn === 'gacha' || s.availableIn === 'both'
-    );
-    if (pool.length === 0) {
-      response = { result: 'gacha_disabled' };
-      return prev;
-    }
-    const picked = pickSkinByRarity(pool);
-    const ownedSet = new Set(
-      prev.ownedSkins.filter((o) => o.childId === input.childId).map((o) => o.skinId)
-    );
-    const isNew = !picked.isDefault && !ownedSet.has(picked.id);
-
-    const updatedChildren = prev.children.map((c) =>
-      c.id === input.childId ? { ...c, coins: c.coins - costCoins } : c
-    );
-    const updatedOwned = isNew ? [...prev.ownedSkins, { childId: input.childId, skinId: picked.id }] : prev.ownedSkins;
-    const nextState: StoreState = { ...prev, children: updatedChildren, ownedSkins: updatedOwned };
-
-    response = { result: 'ok', skin: picked, isNew, costCoins };
-    return nextState;
-  });
-
-  return response;
-}
-
-function pickSkinByRarity(pool: CharacterSkin[]): CharacterSkin {
-  const weights: Record<CharacterSkin['rarity'], number> = {
-    common: 70,
-    rare: 25,
-    epic: 5,
+  return {
+    ...merged,
+    brainCharacters: syncBrainCharactersWithBuddy(merged),
   };
-  const weighted: { skin: CharacterSkin; weight: number }[] = pool.map((skin) => ({
+}
+
+function normalizeWallet(wallet?: Partial<AppState['wallet']>): AppState['wallet'] {
+  return {
+    study: { ...EMPTY_SKIN_WALLET.study, ...(wallet?.study ?? {}) },
+    exercise: { ...EMPTY_SKIN_WALLET.exercise, ...(wallet?.exercise ?? {}) },
+  };
+}
+
+function normalizeProgress(progress?: Partial<AppState['progress']>): AppState['progress'] {
+  return {
+    study: { ...EMPTY_SKIN_PROGRESS.study, ...(progress?.study ?? {}) },
+    exercise: { ...EMPTY_SKIN_PROGRESS.exercise, ...(progress?.exercise ?? {}) },
+  };
+}
+
+function normalizeCategoryTrainingCount(counts?: Partial<CategoryTrainingCount>): CategoryTrainingCount {
+  return {
+    study: counts?.study ?? EMPTY_CATEGORY_TRAINING_COUNT.study,
+    exercise: counts?.exercise ?? EMPTY_CATEGORY_TRAINING_COUNT.exercise,
+  };
+}
+
+function normalizeSessions(sessions?: TrainingSession[]): TrainingSession[] {
+  if (!sessions) return [];
+  return sessions.map((session) => ({
+    ...session,
+    dateKey: session.dateKey ?? getLocalDateKeyFromIso(session.date),
+    tags: normalizeTags(Array.isArray(session.tags) ? session.tags : []),
+  }));
+}
+
+function normalizeTreasure(treasure?: Partial<TreasureState>): TreasureState {
+  const initial = createInitialTreasureState();
+  const chestIndex =
+    typeof treasure?.chestIndex === 'number' && treasure.chestIndex >= 0
+      ? Math.floor(treasure.chestIndex)
+      : initial.chestIndex;
+  const progress =
+    typeof treasure?.progress === 'number' && treasure.progress >= 0 ? treasure.progress : initial.progress;
+  const target =
+    typeof treasure?.target === 'number' && treasure.target > 0
+      ? treasure.target
+      : getTreasureTargetForIndex(chestIndex);
+  const history = Array.isArray(treasure?.history) ? treasure.history : initial.history;
+  return {
+    chestIndex,
+    progress,
+    target,
+    history,
+  };
+}
+
+function buildDefaultBuddyProgress(base?: Partial<BuddyProgress>): BuddyProgress {
+  return {
+    level: base?.level ?? EMPTY_BUDDY_PROGRESS.level,
+    xp: base?.xp ?? EMPTY_BUDDY_PROGRESS.xp,
+    stageIndex: base?.stageIndex ?? EMPTY_BUDDY_PROGRESS.stageIndex,
+    mood: base?.mood ?? EMPTY_BUDDY_PROGRESS.mood,
+  };
+}
+
+function normalizeBuddyState(input: {
+  activeBuddyKeyByChildId?: BuddyActiveByChildId;
+  buddyProgressByChildId?: BuddyProgressByChildId;
+  discoveredFormIdsByChildId?: BuddyDiscoveredFormsByChildId;
+  brainCharacters?: BrainCharacter[];
+  children: ChildProfile[];
+  ownedSkins: OwnedSkin[];
+}): {
+  activeBuddyKeyByChildId: BuddyActiveByChildId;
+  buddyProgressByChildId: BuddyProgressByChildId;
+  discoveredFormIdsByChildId: BuddyDiscoveredFormsByChildId;
+} {
+  const validSkinIds = new Set(CHARACTER_SKINS.map((skin) => skin.id));
+  const defaultSkins = CHARACTER_SKINS.filter((skin) => skin.unlockMethod === 'default');
+  const activeBuddyKeyByChildId: BuddyActiveByChildId = { ...(input.activeBuddyKeyByChildId ?? {}) };
+  const buddyProgressByChildId: BuddyProgressByChildId = { ...(input.buddyProgressByChildId ?? {}) };
+  const discoveredFormIdsByChildId: BuddyDiscoveredFormsByChildId = {
+    ...(input.discoveredFormIdsByChildId ?? {}),
+  };
+  const brainByChild = new Map(
+    (input.brainCharacters ?? []).map((brain) => [brain.childId, brain])
+  );
+  const ownedByChild = new Map<string, Set<string>>();
+  input.children.forEach((child) => {
+    ownedByChild.set(child.id, new Set());
+  });
+  input.ownedSkins.forEach((owned) => {
+    const ownedSet = ownedByChild.get(owned.childId);
+    if (!ownedSet) return;
+    const mapped = validSkinIds.has(owned.skinId) ? owned.skinId : DEFAULT_BUDDY_KEY;
+    ownedSet.add(mapped);
+  });
+
+  input.children.forEach((child) => {
+    const ownedKeys = ownedByChild.get(child.id) ?? new Set();
+    defaultSkins.forEach((skin) => {
+      if (!shouldAutoOwnDefaultSkin(skin.id, ownedKeys)) return;
+      ownedKeys.add(skin.id);
+    });
+
+    let activeKey = activeBuddyKeyByChildId[child.id];
+    if (!activeKey) {
+      const brain = brainByChild.get(child.id);
+      activeKey = brain?.skinId ?? DEFAULT_BUDDY_KEY;
+    }
+    if (!validSkinIds.has(activeKey)) {
+      activeKey = DEFAULT_BUDDY_KEY;
+    }
+    ownedKeys.add(activeKey);
+    activeBuddyKeyByChildId[child.id] = activeKey;
+
+    const childProgress = { ...(buddyProgressByChildId[child.id] ?? {}) };
+    const brain = brainByChild.get(child.id);
+    if (!childProgress[activeKey]) {
+      childProgress[activeKey] = buildDefaultBuddyProgress(
+        brain
+          ? {
+              level: brain.level,
+              xp: brain.xp,
+              mood: brain.mood,
+            }
+          : undefined
+      );
+    }
+    const evolutionLine = findEvolutionLineByFormId(activeKey);
+    const activeStageIndex = childProgress[activeKey]?.stageIndex ?? 0;
+    if (evolutionLine && activeStageIndex > 0) {
+      const evolvedFormId = evolutionLine.stages[activeStageIndex]?.formId;
+      const baseFormId = evolutionLine.stages[0]?.formId;
+      if (evolvedFormId && validSkinIds.has(evolvedFormId)) {
+        if (!childProgress[evolvedFormId]) {
+          childProgress[evolvedFormId] = {
+            ...childProgress[activeKey],
+            stageIndex: activeStageIndex,
+          };
+        }
+        delete childProgress[activeKey];
+        ownedKeys.add(evolvedFormId);
+        if (baseFormId) {
+          ownedKeys.delete(baseFormId);
+        }
+        activeKey = evolvedFormId;
+        activeBuddyKeyByChildId[child.id] = evolvedFormId;
+      }
+    }
+    ownedKeys.forEach((key) => {
+      const stageIndex = getStageIndexByFormId(key) ?? 0;
+      if (!childProgress[key]) {
+        childProgress[key] = buildDefaultBuddyProgress({ stageIndex });
+      } else if (childProgress[key].stageIndex !== stageIndex) {
+        childProgress[key] = { ...childProgress[key], stageIndex };
+      }
+    });
+    buddyProgressByChildId[child.id] = childProgress;
+
+    const discovered = new Set(discoveredFormIdsByChildId[child.id] ?? []);
+    ownedKeys.forEach((key) => {
+      const currentForm = getBuddyForm(key, childProgress[key]?.stageIndex ?? 0);
+      const line = findEvolutionLineByFormId(key);
+      if (line?.stages[0]?.formId) {
+        discovered.add(line.stages[0].formId);
+      }
+      discovered.add(currentForm.formId);
+    });
+    discoveredFormIdsByChildId[child.id] = Array.from(discovered);
+  });
+
+  return {
+    activeBuddyKeyByChildId,
+    buddyProgressByChildId,
+    discoveredFormIdsByChildId,
+  };
+}
+
+function normalizeOpenedTreasureNodeIds(opened?: string[]): string[] {
+  return Array.isArray(opened) ? opened : [];
+}
+
+function syncBrainCharactersWithBuddy(state: StoreState): BrainCharacter[] {
+  const existingByChild = new Map(state.brainCharacters.map((brain) => [brain.childId, brain]));
+  return state.children.map((child) => {
+    const activeKey = state.activeBuddyKeyByChildId[child.id] ?? DEFAULT_BUDDY_KEY;
+    const progress =
+      state.buddyProgressByChildId[child.id]?.[activeKey] ?? buildDefaultBuddyProgress();
+    const existing = existingByChild.get(child.id);
+    return {
+      id: existing?.id ?? `brain-${child.id}`,
+      childId: child.id,
+      level: progress.level,
+      xp: progress.xp,
+      mood: progress.mood,
+      skinId: activeKey,
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+    };
+  });
+}
+
+function migrateSkinState(loaded: Partial<StoreState>): Partial<StoreState> {
+  const validSkinIds = new Set(CHARACTER_SKINS.map((skin) => skin.id));
+  const migrateId = (id: string | undefined) => {
+    if (!id) return DEFAULT_SKIN_ID;
+    const mapped = SKIN_ID_MIGRATION_MAP[id] ?? id;
+    return validSkinIds.has(mapped) ? mapped : DEFAULT_SKIN_ID;
+  };
+
+  const brainCharacters = loaded.brainCharacters?.map((brain) => ({
+    ...brain,
+    skinId: migrateId(brain.skinId),
+  }));
+
+  const ownedSkins = loaded.ownedSkins?.map((owned) => ({
+    ...owned,
+    skinId: migrateId(owned.skinId),
+  }));
+
+  const activeBuddyKeyByChildId = loaded.activeBuddyKeyByChildId
+    ? Object.fromEntries(
+        Object.entries(loaded.activeBuddyKeyByChildId).map(([childId, buddyKey]) => [
+          childId,
+          migrateId(buddyKey),
+        ])
+      )
+    : undefined;
+
+  const buddyProgressByChildId = loaded.buddyProgressByChildId
+    ? Object.fromEntries(
+        Object.entries(loaded.buddyProgressByChildId).map(([childId, progressMap]) => [
+          childId,
+          Object.fromEntries(
+            Object.entries(progressMap ?? {}).map(([buddyKey, progress]) => [
+              migrateId(buddyKey),
+              progress,
+            ])
+          ),
+        ])
+      )
+    : undefined;
+
+  const discoveredFormIdsByChildId = loaded.discoveredFormIdsByChildId
+    ? Object.fromEntries(
+        Object.entries(loaded.discoveredFormIdsByChildId).map(([childId, formIds]) => [
+          childId,
+          (formIds ?? []).map((formId) => SKIN_ID_MIGRATION_MAP[formId] ?? formId),
+        ])
+      )
+    : undefined;
+
+  return {
+    ...loaded,
+    brainCharacters,
+    ownedSkins,
+    activeBuddyKeyByChildId,
+    buddyProgressByChildId,
+    discoveredFormIdsByChildId,
+  };
+}
+
+function ensureDefaultOwnedSkins(ownedSkins: OwnedSkin[], children: ChildProfile[]): OwnedSkin[] {
+  const defaultSkins = CHARACTER_SKINS.filter((skin) => skin.unlockMethod === 'default');
+  if (defaultSkins.length === 0) return ownedSkins;
+
+  const existing = new Set(ownedSkins.map((entry) => `${entry.childId}:${entry.skinId}`));
+  const additions: OwnedSkin[] = [];
+  children.forEach((child) => {
+    const ownedSet = new Set(
+      ownedSkins.filter((entry) => entry.childId === child.id).map((entry) => entry.skinId)
+    );
+    defaultSkins.forEach((skin) => {
+      if (!shouldAutoOwnDefaultSkin(skin.id, ownedSet)) return;
+      const key = `${child.id}:${skin.id}`;
+      if (!existing.has(key)) {
+        additions.push({ childId: child.id, skinId: skin.id });
+        existing.add(key);
+      }
+    });
+  });
+
+  return additions.length ? [...ownedSkins, ...additions] : ownedSkins;
+}
+
+function shouldAutoOwnDefaultSkin(baseFormId: string, ownedSet: Set<string>): boolean {
+  const line = findEvolutionLineByFormId(baseFormId);
+  if (!line) return true;
+  const evolvedIds = line.stages.slice(1).map((stage) => stage.formId);
+  return !evolvedIds.some((id) => ownedSet.has(id));
+}
+
+function getActiveBuddyKey(state: StoreState, childId: string): string {
+  const active = state.activeBuddyKeyByChildId?.[childId];
+  if (active && CHARACTER_SKINS.some((skin) => skin.id === active)) {
+    return active;
+  }
+  return DEFAULT_BUDDY_KEY;
+}
+
+function getBuddyProgress(state: StoreState, childId: string, buddyKey: string): BuddyProgress {
+  const progress = state.buddyProgressByChildId?.[childId]?.[buddyKey] ?? buildDefaultBuddyProgress();
+  const stageIndex = getStageIndexByFormId(buddyKey);
+  if (stageIndex === null || stageIndex === undefined) return progress;
+  if (progress.stageIndex === stageIndex) return progress;
+  return { ...progress, stageIndex };
+}
+
+function getSkinCategoryForActivity(activity?: Activity): 'study' | 'exercise' {
+  if (!activity) return 'study';
+  if (activity.category === 'sports') return 'exercise';
+  if (activity.category === 'study') return 'study';
+  if (activity.category === 'music') return 'study';
+  return 'study';
+}
+
+function buildCategoryTrainingCountFromSessions(
+  sessions: TrainingSession[],
+  activities: Activity[]
+): CategoryTrainingCount {
+  const activityMap = new Map(activities.map((activity) => [activity.id, activity]));
+  return sessions.reduce<CategoryTrainingCount>(
+    (acc, session) => {
+      const activity = activityMap.get(session.activityId);
+      const category = getSkinCategoryForActivity(activity);
+      return { ...acc, [category]: acc[category] + 1 };
+    },
+    { study: 0, exercise: 0 }
+  );
+}
+
+function getSkinCategoryLevel(counts: CategoryTrainingCount, category: 'study' | 'exercise'): number {
+  const count = counts[category] ?? 0;
+  return getCategoryLevelInfoFromCount(count).level;
+}
+
+function getDuplicateCoinReward(skin: CharacterSkin): number {
+  if (skin.rarity === 'rare' || skin.rarity === 'epic') return SKIN_GACHA_DUPLICATE_COINS_RARE;
+  return SKIN_GACHA_DUPLICATE_COINS_COMMON;
+}
+
+function randomInt(min: number, max: number): number {
+  const safeMin = Math.ceil(min);
+  const safeMax = Math.floor(max);
+  return Math.floor(Math.random() * (safeMax - safeMin + 1)) + safeMin;
+}
+
+function rollTreasureRewards(
+  kind: TreasureKind,
+  category: 'study' | 'exercise'
+): { rewards: TreasureReward[]; coins: number; tickets: number; buddyXp: number } {
+  let coinsRange: [number, number] = TREASURE_REWARD_COINS_SMALL;
+  let tickets = 0;
+
+  switch (kind) {
+    case 'medium':
+      coinsRange = TREASURE_REWARD_COINS_MEDIUM;
+      if (Math.random() < TREASURE_REWARD_TICKETS_MEDIUM_CHANCE) {
+        tickets = TREASURE_REWARD_TICKETS_MEDIUM_AMOUNT;
+      }
+      break;
+    case 'large':
+      coinsRange = TREASURE_REWARD_COINS_LARGE;
+      tickets = TREASURE_REWARD_TICKETS_LARGE_AMOUNT;
+      break;
+    case 'small':
+    default:
+      coinsRange = TREASURE_REWARD_COINS_SMALL;
+      break;
+  }
+
+  const coins = randomInt(coinsRange[0], coinsRange[1]);
+  const buddyXp = randomInt(TREASURE_REWARD_BUDDY_XP_RANGE[0], TREASURE_REWARD_BUDDY_XP_RANGE[1]);
+  const rewards: TreasureReward[] = [
+    { type: 'coins', category, amount: coins },
+  ];
+  if (tickets > 0) {
+    rewards.push({ type: 'tickets', category, amount: tickets });
+  }
+  rewards.push({ type: 'buddyXp', amount: buddyXp });
+
+  return { rewards, coins, tickets, buddyXp };
+}
+
+function pickSkinByWeight(pool: CharacterSkin[]): CharacterSkin {
+  const weighted = pool.map((skin) => ({
     skin,
-    weight: weights[skin.rarity] ?? 1,
+    weight: Math.max(1, skin.gachaWeight ?? 1),
   }));
   const total = weighted.reduce((sum, w) => sum + w.weight, 0);
   const r = Math.random() * total;
@@ -815,6 +1640,224 @@ function pickSkinByRarity(pool: CharacterSkin[]): CharacterSkin {
     if (r <= acc) return w.skin;
   }
   return weighted[weighted.length - 1].skin;
+}
+
+function getOwnedSkinsForChildInternal(state: StoreState, childId: string): CharacterSkin[] {
+  const includeMeme = state.settings.enableMemeSkins;
+  const all = getAllSkins(includeMeme);
+  const ownedSet = new Set(
+    state.ownedSkins.filter((o) => o.childId === childId).map((o) => o.skinId)
+  );
+  return all.filter((skin) => {
+    if (skin.unlockMethod === 'default') {
+      return shouldAutoOwnDefaultSkin(skin.id, ownedSet);
+    }
+    return ownedSet.has(skin.id);
+  });
+}
+
+function purchaseSkinInternal(
+  input: { childId: string; skinId: string },
+  setState: React.Dispatch<React.SetStateAction<StoreState | null>>
+): 'ok' | 'not_enough_coins' | 'already_owned' | 'not_found' | 'not_available' | 'locked' {
+  const { childId, skinId } = input;
+  let result: 'ok' | 'not_enough_coins' | 'already_owned' | 'not_found' | 'not_available' | 'locked' = 'not_found';
+  setState((prev) => {
+    if (!prev) return prev;
+    const skin = getSkinById(skinId);
+    if (!skin) {
+      result = 'not_found';
+      return prev;
+    }
+    const child = prev.children.find((c) => c.id === childId);
+    if (!child) {
+      result = 'not_found';
+      return prev;
+    }
+    if (!prev.settings.enableMemeSkins && skin.unlockMethod !== 'default') {
+      result = 'not_available';
+      return prev;
+    }
+    if (skin.unlockMethod !== 'shop' || skin.shopCost === undefined) {
+      result = 'not_available';
+      return prev;
+    }
+    const owned = getOwnedSkinsForChildInternal(prev, childId);
+    if (owned.some((s) => s.id === skin.id)) {
+      result = 'already_owned';
+      return prev;
+    }
+    if (skin.category === 'default') {
+      result = 'not_available';
+      return prev;
+    }
+    if (skin.minLevel) {
+      const categoryLevel = getSkinCategoryLevel(
+        normalizeCategoryTrainingCount(prev.categoryTrainingCount),
+        skin.category
+      );
+      if (categoryLevel < skin.minLevel) {
+        result = 'locked';
+        return prev;
+      }
+    }
+    const wallet = normalizeWallet(prev.wallet);
+    const walletCategory = wallet[skin.category];
+    if (!walletCategory) {
+      result = 'not_available';
+      return prev;
+    }
+    if (walletCategory.coins < skin.shopCost) {
+      result = 'not_enough_coins';
+      return prev;
+    }
+    const updatedWallet: AppState['wallet'] = {
+      ...wallet,
+      [skin.category]: {
+        ...walletCategory,
+        coins: walletCategory.coins - skin.shopCost,
+      },
+    };
+    const updatedOwned = [...prev.ownedSkins, { childId, skinId: skin.id }];
+    const prevChildProgress = prev.buddyProgressByChildId[childId] ?? {};
+    const buddyProgressByChildId = {
+      ...prev.buddyProgressByChildId,
+      [childId]: {
+        ...prevChildProgress,
+        [skin.id]: prevChildProgress[skin.id] ?? buildDefaultBuddyProgress(),
+      },
+    };
+    const discoveredSet = new Set(prev.discoveredFormIdsByChildId?.[childId] ?? []);
+    discoveredSet.add(getBuddyForm(skin.id, 0).formId);
+    const discoveredFormIdsByChildId = {
+      ...prev.discoveredFormIdsByChildId,
+      [childId]: Array.from(discoveredSet),
+    };
+    const nextState: StoreState = {
+      ...prev,
+      wallet: updatedWallet,
+      ownedSkins: updatedOwned,
+      buddyProgressByChildId,
+      discoveredFormIdsByChildId,
+    };
+    result = 'ok';
+    return nextState;
+  });
+  return result;
+}
+
+function rollSkinGachaInternal(
+  input: { childId: string; category: 'study' | 'exercise' },
+  setState: React.Dispatch<React.SetStateAction<StoreState | null>>
+):
+  | { result: 'ok'; skin: CharacterSkin; isNew: boolean; duplicateCoins: number; category: 'study' | 'exercise' }
+  | { result: 'not_enough_tickets' }
+  | { result: 'gacha_disabled' }
+  | { result: 'not_available' } {
+  let response:
+    | { result: 'ok'; skin: CharacterSkin; isNew: boolean; duplicateCoins: number; category: 'study' | 'exercise' }
+    | { result: 'not_enough_tickets' }
+    | { result: 'gacha_disabled' }
+    | { result: 'not_available' } = { result: 'gacha_disabled' };
+
+  setState((prev) => {
+    if (!prev) return prev;
+    if (!prev.settings.enableGacha) {
+      response = { result: 'gacha_disabled' };
+      return prev;
+    }
+    const child = prev.children.find((c) => c.id === input.childId);
+    if (!child) {
+      response = { result: 'not_available' };
+      return prev;
+    }
+    if (!prev.settings.enableMemeSkins) {
+      response = { result: 'not_available' };
+      return prev;
+    }
+    const categoryLevel = getSkinCategoryLevel(
+      normalizeCategoryTrainingCount(prev.categoryTrainingCount),
+      input.category
+    );
+    if (categoryLevel < SKIN_GACHA_UNLOCK_LEVEL) {
+      response = { result: 'not_available' };
+      return prev;
+    }
+    const wallet = normalizeWallet(prev.wallet);
+    const walletCategory = wallet[input.category];
+    if (!walletCategory || walletCategory.tickets < 1) {
+      response = { result: 'not_enough_tickets' };
+      return prev;
+    }
+    const pool = CHARACTER_SKINS.filter(
+      (s) =>
+        s.unlockMethod === 'gacha' &&
+        s.category === input.category &&
+        (s.minLevel ? s.minLevel <= categoryLevel : true)
+    );
+    if (pool.length === 0) {
+      response = { result: 'not_available' };
+      return prev;
+    }
+    const ownedSet = new Set(
+      prev.ownedSkins.filter((o) => o.childId === input.childId).map((o) => o.skinId)
+    );
+    CHARACTER_SKINS.filter((skin) => skin.unlockMethod === 'default').forEach((skin) => ownedSet.add(skin.id));
+    const unownedPool = pool.filter((skin) => !ownedSet.has(skin.id));
+    const usePity = walletCategory.pity >= SKIN_GACHA_PITY_THRESHOLD - 1 && unownedPool.length > 0;
+    const picked = usePity ? unownedPool[Math.floor(Math.random() * unownedPool.length)] : pickSkinByWeight(pool);
+    const isNew = !ownedSet.has(picked.id);
+    const duplicateCoins = isNew ? 0 : getDuplicateCoinReward(picked);
+
+    const updatedOwned = isNew
+      ? [...prev.ownedSkins, { childId: input.childId, skinId: picked.id }]
+      : prev.ownedSkins;
+    const prevChildProgress = prev.buddyProgressByChildId[input.childId] ?? {};
+    const buddyProgressByChildId = isNew
+      ? {
+          ...prev.buddyProgressByChildId,
+          [input.childId]: {
+            ...prevChildProgress,
+            [picked.id]: prevChildProgress[picked.id] ?? buildDefaultBuddyProgress(),
+          },
+        }
+      : prev.buddyProgressByChildId;
+    const discoveredFormIdsByChildId = isNew
+      ? {
+          ...prev.discoveredFormIdsByChildId,
+          [input.childId]: Array.from(
+            new Set([...(prev.discoveredFormIdsByChildId?.[input.childId] ?? []), getBuddyForm(picked.id, 0).formId])
+          ),
+        }
+      : prev.discoveredFormIdsByChildId;
+    const updatedWalletCategory = {
+      ...walletCategory,
+      tickets: walletCategory.tickets - 1,
+      coins: walletCategory.coins + duplicateCoins,
+      pity: isNew ? 0 : walletCategory.pity + 1,
+    };
+    const nextState: StoreState = {
+      ...prev,
+      ownedSkins: updatedOwned,
+      buddyProgressByChildId,
+      discoveredFormIdsByChildId,
+      wallet: {
+        ...wallet,
+        [input.category]: updatedWalletCategory,
+      },
+    };
+
+    response = {
+      result: 'ok',
+      skin: picked,
+      isNew,
+      duplicateCoins,
+      category: input.category,
+    };
+    return nextState;
+  });
+
+  return response;
 }
 
 function updateSettingsInternal(
@@ -888,14 +1931,42 @@ function applyTrainingToMap(
   const mapNodes = nextState.mapNodes.map((n) => (n.id === updatedNode.id ? updatedNode : n));
 
   if (bonusXp > 0 || bonusCoins > 0) {
+    const activeBuddyKey = getActiveBuddyKey(nextState, childId);
+    const prevBuddyProgress = getBuddyProgress(nextState, childId, activeBuddyKey);
+    const buddyUpdated = applyXpToLevel(prevBuddyProgress.level, prevBuddyProgress.xp, bonusXp);
+    const updatedBuddyProgress: BuddyProgress = {
+      ...prevBuddyProgress,
+      level: buddyUpdated.level,
+      xp: buddyUpdated.xp,
+    };
+    const buddyProgressByChildId = {
+      ...nextState.buddyProgressByChildId,
+      [childId]: {
+        ...(nextState.buddyProgressByChildId[childId] ?? {}),
+        [activeBuddyKey]: updatedBuddyProgress,
+      },
+    };
+    const activeBuddyKeyByChildId = {
+      ...nextState.activeBuddyKeyByChildId,
+      [childId]: activeBuddyKey,
+    };
     const children = nextState.children.map((child) => {
       if (child.id !== childId) return child;
-      const { level, xp } = applyXpToLevel(child.level, child.xp, bonusXp);
       return {
         ...child,
-        level,
-        xp,
+        level: updatedBuddyProgress.level,
+        xp: updatedBuddyProgress.xp,
         coins: child.coins + bonusCoins,
+      };
+    });
+    const brainCharacters = nextState.brainCharacters.map((brain) => {
+      if (brain.childId !== childId) return brain;
+      return {
+        ...brain,
+        level: updatedBuddyProgress.level,
+        xp: updatedBuddyProgress.xp,
+        mood: updatedBuddyProgress.mood,
+        skinId: activeBuddyKey,
       };
     });
 
@@ -904,6 +1975,9 @@ function applyTrainingToMap(
         ...nextState,
         mapNodes,
         children,
+        buddyProgressByChildId,
+        activeBuddyKeyByChildId,
+        brainCharacters,
       },
       completedNodes: updatedNode.isCompleted ? [updatedNode] : [],
     };
@@ -1001,27 +2075,62 @@ function checkAndUnlockAchievementsForChild(
 
 function ensureBrainCharacterForChild(
   state: StoreState,
-  childId: string,
-  skins: CharacterSkin[]
+  childId: string
 ): { state: StoreState; character: BrainCharacter } {
-  const existing = state.brainCharacters.find((c) => c.childId === childId);
-  if (existing) return { state, character: existing };
-
-  const defaultSkinId = skins.find((s) => s.isDefault)?.id ?? skins[0]?.id ?? 'default';
-  const now = new Date().toISOString();
-  const character: BrainCharacter = {
-    id: `brain-${childId}`,
-    childId,
-    level: 1,
-    xp: 0,
-    mood: 70,
-    skinId: defaultSkinId,
-    createdAt: now,
+  let nextState = state;
+  const activeBuddyKey = getActiveBuddyKey(state, childId);
+  const prevChildProgress = state.buddyProgressByChildId[childId] ?? {};
+  const progress = prevChildProgress[activeBuddyKey] ?? buildDefaultBuddyProgress();
+  if (!prevChildProgress[activeBuddyKey]) {
+    nextState = {
+      ...nextState,
+      buddyProgressByChildId: {
+        ...nextState.buddyProgressByChildId,
+        [childId]: {
+          ...prevChildProgress,
+          [activeBuddyKey]: progress,
+        },
+      },
+    };
+  }
+  if (nextState.activeBuddyKeyByChildId[childId] !== activeBuddyKey) {
+    nextState = {
+      ...nextState,
+      activeBuddyKeyByChildId: {
+        ...nextState.activeBuddyKeyByChildId,
+        [childId]: activeBuddyKey,
+      },
+    };
+  }
+  const discoveredSet = new Set(nextState.discoveredFormIdsByChildId?.[childId] ?? []);
+  const baseForm = getBuddyForm(activeBuddyKey, 0);
+  const currentForm = getBuddyForm(activeBuddyKey, progress.stageIndex);
+  discoveredSet.add(baseForm.formId);
+  discoveredSet.add(currentForm.formId);
+  nextState = {
+    ...nextState,
+    discoveredFormIdsByChildId: {
+      ...nextState.discoveredFormIdsByChildId,
+      [childId]: Array.from(discoveredSet),
+    },
   };
 
-  const brainCharacters = [...state.brainCharacters, character];
+  const existing = nextState.brainCharacters.find((c) => c.childId === childId);
+  const now = new Date().toISOString();
+  const character: BrainCharacter = {
+    id: existing?.id ?? `brain-${childId}`,
+    childId,
+    level: progress.level,
+    xp: progress.xp,
+    mood: progress.mood,
+    skinId: activeBuddyKey,
+    createdAt: existing?.createdAt ?? now,
+  };
+  const brainCharacters = existing
+    ? nextState.brainCharacters.map((brain) => (brain.childId === childId ? character : brain))
+    : [...nextState.brainCharacters, character];
   return {
-    state: { ...state, brainCharacters },
+    state: { ...nextState, brainCharacters },
     character,
   };
 }
@@ -1039,7 +2148,7 @@ function computeStreakFromSessions(sessions: TrainingSession[], childId: string)
     new Set(
       sessions
         .filter((s) => s.childId === childId)
-        .map((s) => s.date.slice(0, 10))
+        .map((s) => getSessionDateKey(s))
     )
   ).sort();
 
@@ -1059,7 +2168,7 @@ function computeStreakFromSessions(sessions: TrainingSession[], childId: string)
     best = Math.max(best, streak);
   }
 
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayKey = getLocalDateKey(new Date());
   const sortedDesc = [...dates].sort((a, b) => (a > b ? -1 : 1));
   let current = 0;
   let expected = todayKey;
@@ -1084,7 +2193,7 @@ function computeStreakFromSessions(sessions: TrainingSession[], childId: string)
 function prevDateKey(dateKey: string) {
   const date = new Date(`${dateKey}T00:00:00`);
   date.setDate(date.getDate() - 1);
-  return date.toISOString().slice(0, 10);
+  return getLocalDateKey(date);
 }
 
 function dayDiff(fromKey: string, toKey: string) {

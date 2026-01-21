@@ -2,11 +2,11 @@ import React, { useMemo } from 'react';
 import { Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useAppStore } from '../store/AppStoreContext';
-import { RootStackParamList } from '../navigation/types';
+import { RecordStackParamList } from '../navigation/types';
 import { theme } from '../theme';
 import { TrainingSession, Media } from '../types';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'ActivityTimeline'>;
+type Props = NativeStackScreenProps<RecordStackParamList, 'ActivityTimeline'>;
 
 export function ActivityTimelineScreen({ route, navigation }: Props) {
   const { childId, activityId } = route.params;

@@ -13,14 +13,16 @@ import {
 import { ResizeMode, Video } from 'expo-av';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useAppStore } from '../store/AppStoreContext';
-import { RootStackParamList } from '../navigation/types';
+import { RecordStackParamList } from '../navigation/types';
 import { theme } from '../theme';
 import { MediaType } from '../types';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { captureWithCamera, pickFromLibrary, requestMediaPermissions } from '../media/mediaService';
 import { copyIntoAppStorage, deleteFromAppStorageIfOwned } from '../media/localMediaStorage';
+import { sortSessionsByDateAsc } from '../utils/sessionUtils';
+import { formatTag, parseTagsFromText, uniqueTags } from '../utils/tagUtils';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'SessionDetail'>;
+type Props = NativeStackScreenProps<RecordStackParamList, 'SessionDetail'>;
 
 export function SessionDetailScreen({ route, navigation }: Props) {
   const { childId, sessionId } = route.params;
@@ -29,10 +31,12 @@ export function SessionDetailScreen({ route, navigation }: Props) {
     sessions,
     streakByChildId,
     getChildById,
+    getSessionsForChild,
     getMediaForSession,
     addMediaToSession,
     removeMedia,
     updateSessionNote,
+    updateSessionTags,
   } = useAppStore();
 
   const child = getChildById(childId);
@@ -42,6 +46,8 @@ export function SessionDetailScreen({ route, navigation }: Props) {
 
   const [selectedMediaId, setSelectedMediaId] = useState<string | undefined>(undefined);
   const [noteDraft, setNoteDraft] = useState(session?.note ?? '');
+  const [tagInput, setTagInput] = useState('');
+  const [tagsDraft, setTagsDraft] = useState<string[]>(session?.tags ?? []);
 
   useEffect(() => {
     if (media.length === 0) {
@@ -57,6 +63,10 @@ export function SessionDetailScreen({ route, navigation }: Props) {
     setNoteDraft(session?.note ?? '');
   }, [session?.note]);
 
+  useEffect(() => {
+    setTagsDraft(session?.tags ?? []);
+  }, [session?.tags]);
+
   if (!child || !session || !activity) {
     return (
       <SafeAreaView style={styles.screen}>
@@ -69,6 +79,12 @@ export function SessionDetailScreen({ route, navigation }: Props) {
       </SafeAreaView>
     );
   }
+
+  const sessionsForActivity = getSessionsForChild(childId).filter((s) => s.activityId === session.activityId);
+  const sortedAsc = sortSessionsByDateAsc(sessionsForActivity);
+  const idx = sortedAsc.findIndex((s) => s.id === session.id);
+  const prevSession = idx > 0 ? sortedAsc[idx - 1] : undefined;
+  const nextSession = idx >= 0 && idx < sortedAsc.length - 1 ? sortedAsc[idx + 1] : undefined;
 
   const selectedMedia = media.find((m) => m.id === selectedMediaId);
   const hasVideo = media.some((m) => m.type === 'video');
@@ -125,6 +141,21 @@ export function SessionDetailScreen({ route, navigation }: Props) {
 
   const effortStars = '★'.repeat(session.effortLevel);
 
+  const handleAddTagsFromInput = () => {
+    const parsed = parseTagsFromText(tagInput);
+    if (parsed.length === 0) return;
+    const nextTags = uniqueTags([...tagsDraft, ...parsed]);
+    setTagsDraft(nextTags);
+    updateSessionTags(sessionId, nextTags);
+    setTagInput('');
+  };
+
+  const handleRemoveTag = (tag: string) => {
+    const nextTags = tagsDraft.filter((item) => item !== tag);
+    setTagsDraft(nextTags);
+    updateSessionTags(sessionId, nextTags);
+  };
+
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView style={styles.screen} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -155,6 +186,36 @@ export function SessionDetailScreen({ route, navigation }: Props) {
               XP +{session.xpGained} / コイン +{session.coinsGained}
             </Text>
           </View>
+        </View>
+
+        <View style={styles.tagCard}>
+          <Text style={styles.tagTitle}>タグ</Text>
+          <View style={styles.tagInputRow}>
+            <TextInput
+              style={[styles.tagInput, styles.tagInputField]}
+              value={tagInput}
+              onChangeText={setTagInput}
+              placeholder="#体幹 #宿題 など"
+              placeholderTextColor={theme.colors.textDisabled}
+              onSubmitEditing={handleAddTagsFromInput}
+              returnKeyType="done"
+            />
+            <Pressable style={styles.tagAddButton} onPress={handleAddTagsFromInput}>
+              <Text style={styles.tagAddButtonText}>追加</Text>
+            </Pressable>
+          </View>
+          {tagsDraft.length > 0 ? (
+            <View style={styles.tagList}>
+              {tagsDraft.map((tag) => (
+                <Pressable key={tag} style={styles.tagChip} onPress={() => handleRemoveTag(tag)}>
+                  <Text style={styles.tagChipText}>{formatTag(tag)}</Text>
+                  <Text style={styles.tagRemoveText}>×</Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.tagEmpty}>タグがまだありません</Text>
+          )}
         </View>
 
         <View style={styles.mainMediaContainer}>
@@ -219,6 +280,54 @@ export function SessionDetailScreen({ route, navigation }: Props) {
             onChangeText={setNoteDraft}
             onBlur={() => updateSessionNote(sessionId, noteDraft.trim())}
           />
+        </View>
+
+        <View style={styles.compareNavCard}>
+          <View style={styles.compareButtonsRow}>
+            <Pressable
+              onPress={() =>
+                prevSession && navigation.push('SessionDetail', { childId, sessionId: prevSession.id })
+              }
+              disabled={!prevSession}
+              style={[
+                styles.navButton,
+                styles.navButtonLeft,
+                !prevSession && styles.navButtonDisabled,
+              ]}
+            >
+              <Text style={styles.navButtonText}>＜ 前の{activity.name}</Text>
+            </Pressable>
+            <Pressable
+              onPress={() =>
+                nextSession && navigation.push('SessionDetail', { childId, sessionId: nextSession.id })
+              }
+              disabled={!nextSession}
+              style={[
+                styles.navButton,
+                styles.navButtonRight,
+                !nextSession && styles.navButtonDisabled,
+              ]}
+            >
+              <Text style={styles.navButtonText}>次の{activity.name} ＞</Text>
+            </Pressable>
+          </View>
+          {prevSession ? (
+            <Pressable
+              onPress={() =>
+                navigation.navigate('SessionCompare', {
+                  childId,
+                  activityId: session.activityId,
+                  beforeSessionId: prevSession.id,
+                  afterSessionId: session.id,
+                })
+              }
+              style={styles.comparePrimaryButton}
+            >
+              <Text style={styles.comparePrimaryButtonText}>前回と比べる</Text>
+            </Pressable>
+          ) : (
+            <Text style={styles.compareHintText}>前回の記録がまだありません</Text>
+          )}
         </View>
 
         <View style={styles.statusCard}>
@@ -306,6 +415,74 @@ const styles = StyleSheet.create({
   summaryValue: {
     ...theme.typography.body,
     color: theme.colors.textMain,
+  },
+  tagCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    ...theme.shadows.card,
+  },
+  tagTitle: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+    marginBottom: theme.spacing.xs,
+  },
+  tagInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  tagInput: {
+    flex: 1,
+  },
+  tagInputField: {
+    ...theme.typography.body,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    backgroundColor: theme.colors.surface,
+    color: theme.colors.textMain,
+  },
+  tagAddButton: {
+    backgroundColor: theme.colors.primary,
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+  },
+  tagAddButtonText: {
+    ...theme.typography.label,
+    color: '#FFFFFF',
+  },
+  tagList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+  },
+  tagChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: theme.radius.lg,
+    backgroundColor: theme.colors.surfaceAlt,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 4,
+    gap: theme.spacing.xs,
+  },
+  tagChipText: {
+    ...theme.typography.caption,
+    color: theme.colors.textMain,
+  },
+  tagRemoveText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+  },
+  tagEmpty: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    marginTop: theme.spacing.sm,
   },
   mainMediaContainer: {
     backgroundColor: theme.colors.surface,
@@ -429,6 +606,56 @@ const styles = StyleSheet.create({
     marginBottom: theme.spacing.xs,
   },
   statusText: {
+    ...theme.typography.body,
+    color: theme.colors.textSub,
+  },
+  compareNavCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    ...theme.shadows.card,
+  },
+  compareButtonsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: theme.spacing.sm,
+  },
+  navButton: {
+    flex: 1,
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.lg,
+    paddingVertical: theme.spacing.sm,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+  },
+  navButtonLeft: {
+    marginRight: theme.spacing.sm,
+  },
+  navButtonRight: {
+    marginLeft: theme.spacing.sm,
+  },
+  navButtonText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  navButtonDisabled: {
+    opacity: 0.4,
+  },
+  comparePrimaryButton: {
+    backgroundColor: theme.colors.primary,
+    borderRadius: theme.radius.lg,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  comparePrimaryButtonText: {
+    ...theme.typography.body,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  compareHintText: {
     ...theme.typography.body,
     color: theme.colors.textSub,
   },

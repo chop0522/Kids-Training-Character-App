@@ -9,6 +9,9 @@ import {
 } from '../types';
 import { loadAppState, saveAppState } from '../storage/appStorage';
 import { calculateCoins, calculateXp, computeStreaks, getLevelFromXp } from '../utils/progress';
+import { createInitialTreasureState } from '../treasureConfig';
+import { getLocalDateKey, getLocalDateKeyFromIso } from '../utils/sessionUtils';
+import { normalizeTags } from '../utils/tagUtils';
 
 type AddTrainingPayload = {
   childId: string;
@@ -16,6 +19,7 @@ type AddTrainingPayload = {
   durationMinutes: number;
   effortLevel: EffortLevel;
   note?: string;
+  tags?: string[];
 };
 
 type AppDataContextValue = {
@@ -30,6 +34,26 @@ type AppDataContextValue = {
 const AppDataContext = createContext<AppDataContextValue | undefined>(undefined);
 
 const starterNodeTypes: Array<'normal' | 'treasure' | 'boss'> = ['normal', 'treasure', 'normal', 'boss'];
+const emptyWallet = {
+  study: { coins: 0, tickets: 0, ticketProgress: 0, pity: 0 },
+  exercise: { coins: 0, tickets: 0, ticketProgress: 0, pity: 0 },
+};
+const emptyProgress = {
+  study: { completedCount: 0 },
+  exercise: { completedCount: 0 },
+};
+const emptyCategoryTrainingCount = {
+  study: 0,
+  exercise: 0,
+};
+
+function normalizeSessions(sessions: TrainingSession[]): TrainingSession[] {
+  return sessions.map((session) => ({
+    ...session,
+    dateKey: session.dateKey ?? getLocalDateKeyFromIso(session.date),
+    tags: normalizeTags(Array.isArray(session.tags) ? session.tags : []),
+  }));
+}
 
 function buildStarterNodes(childId: string) {
   return starterNodeTypes.map((type, index) => ({
@@ -54,10 +78,21 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     (async () => {
       const loaded = await loadAppState();
+      const normalizedSessions = normalizeSessions(loaded.sessions ?? []);
       setState({
         ...loaded,
+        sessions: normalizedSessions,
         mediaItems: loaded.mediaItems ?? loaded.media ?? [],
         media: loaded.mediaItems ?? loaded.media ?? [],
+        wallet: loaded.wallet ?? emptyWallet,
+        progress: loaded.progress ?? emptyProgress,
+        categoryTrainingCount: loaded.categoryTrainingCount ?? emptyCategoryTrainingCount,
+        activeBuddyKeyByChildId: loaded.activeBuddyKeyByChildId ?? {},
+        buddyProgressByChildId: loaded.buddyProgressByChildId ?? {},
+        discoveredFormIdsByChildId: loaded.discoveredFormIdsByChildId ?? {},
+        treasure: loaded.treasure ?? createInitialTreasureState(),
+        lastActivityCategory: loaded.lastActivityCategory ?? 'study',
+        openedTreasureNodeIds: loaded.openedTreasureNodeIds ?? [],
       });
       if (loaded.children.length > 0) {
         setSelectedChildId(loaded.children[0].id);
@@ -89,6 +124,8 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       totalMinutes: 0,
     };
 
+    const defaultSkinId =
+      state.characterSkins.find((skin) => skin.isDefault)?.id ?? state.characterSkins[0]?.id ?? 'boneca_sd_pixel_v2';
     const nextState: AppState = {
       ...state,
       children: [...state.children, newChild],
@@ -102,7 +139,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
           level: 1,
           xp: 0,
           mood: 80,
-          skinId: state.characterSkins[0]?.id ?? 'skin-original-1',
+          skinId: defaultSkinId,
           createdAt: new Date().toISOString(),
         },
       ],
@@ -110,6 +147,21 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         ...state.mapNodes,
         ...buildStarterNodes(newChild.id),
       ],
+      activeBuddyKeyByChildId: {
+        ...(state.activeBuddyKeyByChildId ?? {}),
+        [newChild.id]: defaultSkinId,
+      },
+      buddyProgressByChildId: {
+        ...(state.buddyProgressByChildId ?? {}),
+        [newChild.id]: {
+          [defaultSkinId]: { level: 1, xp: 0, stageIndex: 0, mood: 80 },
+        },
+      },
+      discoveredFormIdsByChildId: {
+        ...(state.discoveredFormIdsByChildId ?? {}),
+        [newChild.id]: [defaultSkinId],
+      },
+      openedTreasureNodeIds: state.openedTreasureNodeIds ?? [],
     };
 
     await persistState(nextState);
@@ -122,7 +174,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   ): Promise<TrainingSession | null> => {
     if (!state) return null;
 
-    const { childId, activityId, durationMinutes, effortLevel, note } = payload;
+    const { childId, activityId, durationMinutes, effortLevel, note, tags } = payload;
     const sessionXp = calculateXp(durationMinutes, effortLevel);
     const sessionCoins = calculateCoins(durationMinutes, effortLevel);
     let mapRewardXp = 0;
@@ -145,15 +197,18 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     const totalXpGain = sessionXp + mapRewardXp;
     const totalCoinGain = sessionCoins + mapRewardCoins;
 
+    const sessionTags = normalizeTags(tags);
     const session: TrainingSession = {
       id: nanoid(10),
       childId,
       activityId,
       date: new Date().toISOString(),
+      dateKey: getLocalDateKey(new Date()),
       durationMinutes,
       effortLevel,
       xpGained: totalXpGain,
       coinsGained: totalCoinGain,
+      tags: sessionTags,
       note,
     };
 
@@ -179,6 +234,15 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     const updatedBrainCharacters = state.brainCharacters.map((brain) =>
       brain.childId === childId ? { ...brain, level, xp: newXpTotal, mood: Math.min(100, brain.mood + 5) } : brain
     );
+    const activity = state.activities.find((a) => a.id === activityId);
+    const lastActivityCategory = activity?.category === 'sports' ? 'exercise' : 'study';
+    const treasure = state.treasure ?? createInitialTreasureState();
+    const updatedTreasure = { ...treasure, progress: treasure.progress + 1 };
+    const categoryTrainingCount = state.categoryTrainingCount ?? emptyCategoryTrainingCount;
+    const updatedCategoryTrainingCount = {
+      ...categoryTrainingCount,
+      [lastActivityCategory]: (categoryTrainingCount[lastActivityCategory] ?? 0) + 1,
+    };
 
     const nextState: AppState = {
       ...state,
@@ -188,6 +252,9 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       sessions: updatedSessions,
       mapNodes: updatedMapNodes,
       brainCharacters: updatedBrainCharacters,
+      treasure: updatedTreasure,
+      lastActivityCategory,
+      categoryTrainingCount: updatedCategoryTrainingCount,
     };
 
     await persistState(nextState);

@@ -2,14 +2,14 @@ import React, { useMemo } from 'react';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useAppStore } from '../store/AppStoreContext';
-import { RootStackParamList } from '../navigation/types';
+import { BuddyStackParamList } from '../navigation/types';
 import { theme } from '../theme';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Achievements'>;
+type Props = NativeStackScreenProps<BuddyStackParamList, 'Achievements'>;
 
 export function AchievementsScreen({ route, navigation }: Props) {
-  const { getChildById, getAchievementsForChild } = useAppStore();
-  const childId = route.params.childId;
+  const { selectedChildId, getChildById, getAchievementsForChild } = useAppStore();
+  const childId = route.params?.childId ?? selectedChildId ?? '';
   const child = getChildById(childId);
 
   const items = useMemo(() => {

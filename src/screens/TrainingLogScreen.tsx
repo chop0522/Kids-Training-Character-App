@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
@@ -12,18 +13,23 @@ import {
   View,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../navigation/types';
 import { useAppStore } from '../store/AppStoreContext';
 import { theme } from '../theme';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { calculateCoins, calculateXp, EffortLevel } from '../xp';
+import type { TrainingResult } from '../types';
+import { buildTagFrequency, formatTag, normalizeTag, normalizeTags, parseTagsFromText, uniqueTags } from '../utils/tagUtils';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'TrainingLog'>;
+type TrainingLogParamList = {
+  TrainingLog: { childId: string };
+};
+
+type Props = NativeStackScreenProps<TrainingLogParamList, 'TrainingLog'>;
 
 const quickDurations = [5, 10, 20, 30];
 
 export function TrainingLogScreen({ navigation, route }: Props) {
-  const { getChildById, getActivitiesForFamily, logTrainingSession } = useAppStore();
+  const { getChildById, getActivitiesForFamily, getSessionsForChild, logTrainingSession } = useAppStore();
   const childId = route.params.childId;
   const child = getChildById(childId);
   const activities = child ? getActivitiesForFamily(child.familyId) : [];
@@ -32,7 +38,10 @@ export function TrainingLogScreen({ navigation, route }: Props) {
   const [durationText, setDurationText] = useState('20');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(2);
   const [note, setNote] = useState('');
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
   const [saving, setSaving] = useState(false);
+  const [rewardResult, setRewardResult] = useState<TrainingResult | null>(null);
 
   useEffect(() => {
     if (activities.length > 0 && !activityId) {
@@ -44,33 +53,57 @@ export function TrainingLogScreen({ navigation, route }: Props) {
   const xpPreview = useMemo(() => calculateXp(durationMinutes, effortLevel), [durationMinutes, effortLevel]);
   const coinPreview = useMemo(() => calculateCoins(durationMinutes, effortLevel), [durationMinutes, effortLevel]);
   const canSave = Boolean(activityId) && durationMinutes > 0 && !saving;
+  const childSessions = useMemo(() => (child ? getSessionsForChild(child.id) : []), [child, getSessionsForChild]);
+  const recentSessions = useMemo(
+    () => [...childSessions].sort((a, b) => (a.date > b.date ? -1 : 1)).slice(0, 30),
+    [childSessions]
+  );
+  const fixedTagSuggestions = useMemo(
+    () => normalizeTags(['リフティング', '体幹', '宿題', '子供チャレンジ']),
+    []
+  );
+  const frequentTags = useMemo(() => buildTagFrequency(recentSessions, 10), [recentSessions]);
+  const suggestionTags = useMemo(() => {
+    const merged = uniqueTags([...fixedTagSuggestions, ...frequentTags]);
+    const current = new Set(tags.map((tag) => tag.toLowerCase()));
+    return merged.filter((tag) => !current.has(tag.toLowerCase()));
+  }, [fixedTagSuggestions, frequentTags, tags]);
+
+  const handleAddTagsFromInput = () => {
+    const parsed = parseTagsFromText(tagInput);
+    if (parsed.length === 0) return;
+    setTags((prev) => uniqueTags([...prev, ...parsed]));
+    setTagInput('');
+  };
+
+  const handleAddTag = (tag: string) => {
+    const normalized = normalizeTag(tag);
+    if (!normalized) return;
+    setTags((prev) => uniqueTags([...prev, normalized]));
+  };
+
+  const handleRemoveTag = (tag: string) => {
+    setTags((prev) => prev.filter((item) => item !== tag));
+  };
 
   const handleSave = () => {
     if (!child || !activityId || !canSave) return;
     setSaving(true);
+    const finalTags = uniqueTags([...tags, ...parseTagsFromText(tagInput)]);
     const result = logTrainingSession({
       childId: child.id,
       activityId,
       durationMinutes,
       effortLevel,
       note: note.trim() || undefined,
+      tags: finalTags,
     });
     setSaving(false);
     if (!result) {
       showAlert('エラー', '保存に失敗しました');
       return;
     }
-    if (result.levelUps > 0) {
-      showAlert('レベルアップ！', 'レベルが上がったよ！');
-    }
-    if (result.completedNodes.some((n) => n.type === 'treasure')) {
-      showAlert('宝箱マスクリア！', 'ごほうびコインをゲット！');
-    }
-    if (result.unlockedAchievements.length > 0) {
-      const a = result.unlockedAchievements[0];
-      showAlert('バッジをてにいれた！', a.title);
-    }
-    navigation.navigate('ChildDashboard', { childId: child.id });
+    setRewardResult(result);
   };
 
   if (!child) {
@@ -163,6 +196,44 @@ export function TrainingLogScreen({ navigation, route }: Props) {
           </View>
 
           <View style={styles.section}>
+            <Text style={styles.label}>タグ</Text>
+            <View style={styles.tagInputRow}>
+              <TextInput
+                style={[styles.textInput, styles.tagInput]}
+                value={tagInput}
+                onChangeText={setTagInput}
+                placeholder="#体幹 #宿題 など"
+                placeholderTextColor={theme.colors.textDisabled}
+                onSubmitEditing={handleAddTagsFromInput}
+                returnKeyType="done"
+              />
+              <Pressable style={styles.tagAddButton} onPress={handleAddTagsFromInput}>
+                <Text style={styles.tagAddButtonText}>追加</Text>
+              </Pressable>
+            </View>
+            {tags.length > 0 && (
+              <View style={styles.tagList}>
+                {tags.map((tag) => (
+                  <Pressable key={tag} style={styles.tagChip} onPress={() => handleRemoveTag(tag)}>
+                    <Text style={styles.tagChipText}>{formatTag(tag)}</Text>
+                    <Text style={styles.tagRemoveText}>×</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+            {suggestionTags.length > 0 && (
+              <View style={styles.tagSuggestions}>
+                {suggestionTags.map((tag) => (
+                  <Pressable key={tag} style={styles.tagSuggestion} onPress={() => handleAddTag(tag)}>
+                    <Text style={styles.tagSuggestionText}>{formatTag(tag)}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+            <Text style={styles.helperText}>スペース区切りでまとめて入力できます</Text>
+          </View>
+
+          <View style={styles.section}>
             <Text style={styles.label}>メモ（任意）</Text>
             <TextInput
               style={[styles.textInput, styles.noteInput]}
@@ -185,6 +256,41 @@ export function TrainingLogScreen({ navigation, route }: Props) {
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
+      <Modal
+        transparent
+        visible={Boolean(rewardResult)}
+        animationType="fade"
+        onRequestClose={() => setRewardResult(null)}
+      >
+        {rewardResult && (
+          <View style={styles.rewardOverlay}>
+            <View style={styles.rewardCard}>
+              <Text style={styles.rewardTitle}>おつかれさま！</Text>
+              <Text style={styles.rewardSubtitle}>がんばりが たまったよ</Text>
+              <View style={styles.rewardLines}>
+                <Text style={styles.rewardLine}>相棒XP +{rewardResult.buddyXpGained}</Text>
+                <Text style={styles.rewardLine}>
+                  {rewardResult.skinCategory === 'study' ? '勉強' : '運動'}コイン +{rewardResult.skinCoinsGained}
+                </Text>
+                <Text style={styles.rewardLine}>
+                  チケット進捗 +1（あと{Math.max(0, rewardResult.ticketProgressMax - rewardResult.ticketProgress)}で+1）
+                </Text>
+                {rewardResult.ticketsGained > 0 && (
+                  <Text style={styles.rewardBonus}>チケット +{rewardResult.ticketsGained}</Text>
+                )}
+              </View>
+              <PrimaryButton
+                title="OK"
+                onPress={() => {
+                  setRewardResult(null);
+                  navigation.goBack();
+                }}
+                style={styles.rewardButton}
+              />
+            </View>
+          </View>
+        )}
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -259,6 +365,64 @@ const styles = StyleSheet.create({
     paddingVertical: theme.spacing.sm,
     backgroundColor: theme.colors.surface,
     color: theme.colors.textMain,
+  },
+  tagInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  tagInput: {
+    flex: 1,
+  },
+  tagAddButton: {
+    backgroundColor: theme.colors.primary,
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+  },
+  tagAddButtonText: {
+    ...theme.typography.label,
+    color: '#FFFFFF',
+  },
+  tagList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+  },
+  tagChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: theme.radius.lg,
+    backgroundColor: theme.colors.surfaceAlt,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 4,
+    gap: theme.spacing.xs,
+  },
+  tagChipText: {
+    ...theme.typography.caption,
+    color: theme.colors.textMain,
+  },
+  tagRemoveText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+  },
+  tagSuggestions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+  },
+  tagSuggestion: {
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 4,
+  },
+  tagSuggestionText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
   },
   noteInput: {
     minHeight: 96,
@@ -342,5 +506,50 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     ...theme.typography.body,
     color: theme.colors.textSub,
+  },
+  rewardOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: theme.spacing.lg,
+  },
+  rewardCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.lg,
+    alignItems: 'center',
+    ...theme.shadows.card,
+  },
+  rewardTitle: {
+    ...theme.typography.heading1,
+    color: theme.colors.textMain,
+  },
+  rewardSubtitle: {
+    ...theme.typography.body,
+    color: theme.colors.textSub,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.md,
+  },
+  rewardLines: {
+    width: '100%',
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    gap: theme.spacing.xs,
+  },
+  rewardLine: {
+    ...theme.typography.body,
+    color: theme.colors.textMain,
+  },
+  rewardBonus: {
+    ...theme.typography.label,
+    color: theme.colors.accent,
+  },
+  rewardButton: {
+    alignSelf: 'stretch',
   },
 });

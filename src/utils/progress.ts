@@ -43,7 +43,7 @@ export function computeStreaks(
 ) {
   const childSessions = sessions.filter((s) => s.childId === childId);
   const uniqueDays = Array.from(
-    new Set(childSessions.map((s) => toDateKey(new Date(s.date))))
+    new Set(childSessions.map((s) => s.dateKey ?? toDateKey(new Date(s.date))))
   ).sort((a, b) => (a > b ? -1 : 1)); // newest first
 
   const todayKey = toDateKey(today);
@@ -82,7 +82,11 @@ export function computeStreaks(
 }
 
 function toDateKey(date: Date) {
-  return startOfDay(date).toISOString().split('T')[0];
+  const local = startOfDay(date);
+  const y = local.getFullYear();
+  const m = String(local.getMonth() + 1).padStart(2, '0');
+  const d = String(local.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 function startOfDay(date: Date) {

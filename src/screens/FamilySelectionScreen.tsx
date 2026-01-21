@@ -9,18 +9,18 @@ import { PrimaryButton } from '../components/PrimaryButton';
 type Props = NativeStackScreenProps<RootStackParamList, 'FamilySelection'>;
 
 export function FamilySelectionScreen({ navigation }: Props) {
-  const { children, selectChild, addChild } = useAppStore();
+  const { children, selectChild, addChild, getActiveBuddyKeyForChild, getBuddyProgressForChild } = useAppStore();
 
   const handleSelect = (childId: string) => {
     selectChild(childId);
-    navigation.navigate('ChildDashboard', { childId });
+    navigation.navigate('MainTabs');
   };
 
   const handleAddChild = async () => {
     const name = `ニューキッズ${children.length + 1}`;
     const created = await addChild(name);
     if (created) {
-      navigation.navigate('ChildDashboard', { childId: created.id });
+      navigation.navigate('MainTabs');
     }
   };
 
@@ -41,7 +41,7 @@ export function FamilySelectionScreen({ navigation }: Props) {
             <View style={styles.cardBody}>
               <Text style={styles.name}>{item.name}</Text>
               <Text style={styles.meta}>
-                Lv.{item.level} ・ {item.coins} コイン
+                相棒Lv.{getBuddyProgressForChild(item.id, getActiveBuddyKeyForChild(item.id))?.level ?? 1} ・ {item.coins} コイン
               </Text>
               <Text style={styles.streak}>連続 {item.currentStreak} 日</Text>
             </View>

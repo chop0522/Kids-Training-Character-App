@@ -46,10 +46,12 @@ export type TrainingSession = {
   childId: string;
   activityId: string;
   date: string; // ISO string
+  dateKey: string; // YYYY-MM-DD (local date)
   durationMinutes: number;
   effortLevel: EffortLevel;
   xpGained: number;
   coinsGained: number;
+  tags: string[];
   note?: string;
 };
 
@@ -66,15 +68,25 @@ export type Media = {
 
 export type CharacterSkinRarity = 'common' | 'rare' | 'epic';
 
+export type SkinCategory = 'default' | 'study' | 'exercise';
+
+export type SkinUnlockMethod = 'default' | 'shop' | 'gacha' | 'evolution';
+
 export type CharacterSkin = {
   id: string;
   name: string;
-  type: 'original' | 'meme';
+  category: SkinCategory;
+  unlockMethod: SkinUnlockMethod;
   rarity: CharacterSkinRarity;
   isDefault: boolean;
-  priceCoins?: number;
-  availableIn: 'shop' | 'gacha' | 'both';
+  shopCost?: number;
+  gachaWeight?: number;
+  minLevel?: number;
   assetKey: string; // key to find the image asset
+  isSelectableBuddy?: boolean;
+  isShopVisible?: boolean;
+  isGachaVisible?: boolean;
+  evolutionStageIndex?: number;
 };
 
 export type OwnedSkin = {
@@ -91,6 +103,18 @@ export type BrainCharacter = {
   skinId: string; // CharacterSkin.id
   createdAt: string;
 };
+
+export type BuddyProgress = {
+  level: number;
+  xp: number;
+  stageIndex: number;
+  mood: number;
+};
+
+export type BuddyProgressById = Record<string, BuddyProgress>;
+export type BuddyProgressByChildId = Record<string, BuddyProgressById>;
+export type BuddyActiveByChildId = Record<string, string>;
+export type BuddyDiscoveredFormsByChildId = Record<string, string[]>;
 
 export type MapNodeType = 'normal' | 'treasure' | 'boss';
 
@@ -137,9 +161,63 @@ export type AppSettings = {
   parentPin?: string;
 };
 
+export type SkinWalletCategory = {
+  coins: number;
+  tickets: number;
+  ticketProgress: number;
+  pity: number;
+};
+
+export type SkinWallet = {
+  study: SkinWalletCategory;
+  exercise: SkinWalletCategory;
+};
+
+export type SkinProgressCategory = {
+  completedCount: number;
+};
+
+export type SkinProgress = {
+  study: SkinProgressCategory;
+  exercise: SkinProgressCategory;
+};
+
+export type CategoryTrainingCount = {
+  study: number;
+  exercise: number;
+};
+
+export type TreasureKind = 'small' | 'medium' | 'large';
+
+export type TreasureReward = {
+  type: 'coins' | 'tickets' | 'buddyXp';
+  category?: 'study' | 'exercise';
+  amount: number;
+};
+
+export type TreasureHistoryItem = {
+  index: number;
+  openedAtISO: string;
+  kind: TreasureKind;
+  rewards: TreasureReward[];
+};
+
+export type TreasureState = {
+  chestIndex: number;
+  progress: number;
+  target: number;
+  history: TreasureHistoryItem[];
+};
+
 export type TrainingResult = {
   sessionId: string;
-  levelUps: number;
+  buddyLevelUps: number;
+  buddyXpGained: number;
+  skinCategory: 'study' | 'exercise';
+  skinCoinsGained: number;
+  ticketsGained: number;
+  ticketProgress: number;
+  ticketProgressMax: number;
   completedNodes: MapNode[];
   unlockedAchievements: Achievement[];
 };
@@ -159,4 +237,13 @@ export type AppState = {
   achievements: Achievement[];
   childAchievements: ChildAchievement[];
   settings: AppSettings;
+  wallet: SkinWallet;
+  progress: SkinProgress;
+  categoryTrainingCount: CategoryTrainingCount;
+  activeBuddyKeyByChildId: BuddyActiveByChildId;
+  buddyProgressByChildId: BuddyProgressByChildId;
+  discoveredFormIdsByChildId: BuddyDiscoveredFormsByChildId;
+  treasure: TreasureState;
+  lastActivityCategory?: 'study' | 'exercise';
+  openedTreasureNodeIds: string[];
 };

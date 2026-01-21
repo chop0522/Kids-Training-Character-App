@@ -3,6 +3,8 @@ import { Activity, AppState, BrainCharacter, ChildProfile, Family, OwnedSkin } f
 import { getLevelFromXp } from '../utils/progress';
 import { generateInitialMapForChild } from '../mapConfig';
 import { CHARACTER_SKINS } from '../characterSkinsConfig';
+import { getBuddyForm } from '../characterEvolutionConfig';
+import { createInitialTreasureState } from '../treasureConfig';
 
 const defaultActivities: Activity[] = [
   { id: 'act-soccer', familyId: null, name: 'サッカー', category: 'sports', iconKey: '⚽️' },
@@ -39,6 +41,20 @@ function makeBrainCharacter(childId: string, skinId: string, level: number, xp: 
   };
 }
 
+const emptyWallet = {
+  study: { coins: 0, tickets: 0, ticketProgress: 0, pity: 0 },
+  exercise: { coins: 0, tickets: 0, ticketProgress: 0, pity: 0 },
+};
+
+const emptyProgress = {
+  study: { completedCount: 0 },
+  exercise: { completedCount: 0 },
+};
+const emptyCategoryTrainingCount = {
+  study: 0,
+  exercise: 0,
+};
+
 export function createSeedState(): AppState {
   const family: Family = {
     id: 'family-default',
@@ -52,15 +68,38 @@ export function createSeedState(): AppState {
     makeChild(family.id, 'ケン', 'lightning', 120, 45),
   ];
 
-  const defaultSkin = CHARACTER_SKINS.find((s) => s.isDefault) ?? CHARACTER_SKINS[0];
+  const defaultSkins = CHARACTER_SKINS.filter((skin) => skin.unlockMethod === 'default');
+  const defaultSkin = defaultSkins.find((s) => s.isDefault) ?? defaultSkins[0] ?? CHARACTER_SKINS[0];
   const brainCharacters: BrainCharacter[] = children.map((child) =>
     makeBrainCharacter(child.id, defaultSkin.id, child.level, child.xp)
   );
 
   const mapNodes = children.flatMap((child) => generateInitialMapForChild(child.id));
-  const ownedSkins: OwnedSkin[] = defaultSkin
-    ? children.map((child) => ({ childId: child.id, skinId: defaultSkin.id }))
+  const ownedSkins: OwnedSkin[] = defaultSkins.length
+    ? children.flatMap((child) => defaultSkins.map((skin) => ({ childId: child.id, skinId: skin.id })))
     : [];
+  const activeBuddyKeyByChildId = Object.fromEntries(children.map((child) => [child.id, defaultSkin.id]));
+  const buddyProgressByChildId = Object.fromEntries(
+    children.map((child) => {
+      const progressById: Record<string, { level: number; xp: number; stageIndex: number; mood: number }> = {};
+      defaultSkins.forEach((skin) => {
+        const isActive = skin.id === defaultSkin.id;
+        progressById[skin.id] = {
+          level: isActive ? child.level : 1,
+          xp: isActive ? child.xp : 0,
+          stageIndex: 0,
+          mood: 80,
+        };
+      });
+      return [child.id, progressById];
+    })
+  );
+  const discoveredFormIdsByChildId = Object.fromEntries(
+    children.map((child) => [
+      child.id,
+      defaultSkins.map((skin) => getBuddyForm(skin.id, 0).formId),
+    ])
+  );
 
   return {
     families: [family],
@@ -77,5 +116,14 @@ export function createSeedState(): AppState {
     childAchievements: [],
     ownedSkins,
     settings: { enableMemeSkins: false, enableGacha: true, parentPin: undefined },
+    wallet: emptyWallet,
+    progress: emptyProgress,
+    categoryTrainingCount: emptyCategoryTrainingCount,
+    activeBuddyKeyByChildId,
+    buddyProgressByChildId,
+    discoveredFormIdsByChildId,
+    treasure: createInitialTreasureState(),
+    lastActivityCategory: 'study',
+    openedTreasureNodeIds: [],
   };
 }
