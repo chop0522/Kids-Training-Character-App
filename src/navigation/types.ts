@@ -39,6 +39,7 @@ export type SettingsStackParamList = {
   ParentSettings: undefined;
   FamilySharing: undefined;
   SkinGallery: undefined;
+  AppInfo: undefined;
 };
 
 export type RootStackParamList = {

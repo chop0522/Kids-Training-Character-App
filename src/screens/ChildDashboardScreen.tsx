@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { HomeStackParamList } from '../navigation/types';
 import { useAppStore } from '../store/AppStoreContext';
@@ -9,6 +9,7 @@ import { BuddyAvatar } from '../components/BuddyAvatar';
 import { getBuddyForm } from '../characterEvolutionConfig';
 import { getSkinById } from '../characterSkinsConfig';
 import { createInitialTreasureState, getTreasureKind, TREASURE_KIND_LABELS } from '../treasureConfig';
+import { useParentalGate } from '../hooks/useParentalGate';
 
 // Home screen (Duolingo-style entry point)
 type Props = NativeStackScreenProps<HomeStackParamList, 'Home'>;
@@ -34,6 +35,7 @@ export function ChildDashboardScreen({ navigation, route }: Props) {
   const treasureCompleted = Math.min(treasure.progress, treasure.target);
   const treasurePercent =
     treasure.target === 0 ? 0 : Math.min(100, Math.round((treasureCompleted / treasure.target) * 100));
+  const { requestParentalGate, ParentalGate } = useParentalGate();
 
   if (!child) {
     return (
@@ -67,6 +69,25 @@ export function ChildDashboardScreen({ navigation, route }: Props) {
     }
   };
 
+  const openChildSwitch = async () => {
+    const ok = await requestParentalGate();
+    if (!ok) return;
+    const doReset = () => {
+      const root = navigation.getParent()?.getParent() ?? navigation.getParent();
+      if (root) {
+        root.reset({ index: 0, routes: [{ name: 'FamilySelection' as never }] });
+      }
+    };
+    if (Platform.OS === 'web') {
+      doReset();
+      return;
+    }
+    Alert.alert('子どもを切り替えますか？', undefined, [
+      { text: 'キャンセル', style: 'cancel' },
+      { text: '切り替える', onPress: doReset },
+    ]);
+  };
+
   const openBuddyTab = () => {
     const parent = navigation.getParent();
     if (parent) {
@@ -84,14 +105,20 @@ export function ChildDashboardScreen({ navigation, route }: Props) {
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {ParentalGate}
         <View style={styles.headerRow}>
           <View>
             <Text style={styles.headerTitle}>{child.name}のきょう</Text>
             <Text style={styles.headerSub}>まずはトレーニングを記録しよう</Text>
           </View>
-          <Pressable onPress={openSettings} style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}>
-            <Text style={styles.settingsIcon}>⚙️</Text>
-          </Pressable>
+          <View style={styles.headerActions}>
+            <Pressable onPress={openChildSwitch} style={({ pressed }) => [styles.switchButton, pressed && styles.pressed]}>
+              <Text style={styles.switchButtonText}>子ども切替</Text>
+            </Pressable>
+            <Pressable onPress={openSettings} style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}>
+              <Text style={styles.settingsIcon}>⚙️</Text>
+            </Pressable>
+          </View>
         </View>
 
         <Pressable onPress={openBuddyTab} style={({ pressed }) => [styles.buddyCard, pressed && styles.pressed]}>
@@ -201,6 +228,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: theme.spacing.md,
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+  },
   headerTitle: {
     ...theme.typography.heading1,
     color: theme.colors.textMain,
@@ -220,6 +252,16 @@ const styles = StyleSheet.create({
   },
   settingsIcon: {
     fontSize: 20,
+  },
+  switchButton: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.full,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
+  },
+  switchButtonText: {
+    ...theme.typography.caption,
+    color: theme.colors.textMain,
   },
   buddyCard: {
     backgroundColor: theme.colors.surface,

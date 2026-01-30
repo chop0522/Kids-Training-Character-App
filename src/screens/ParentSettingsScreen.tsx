@@ -15,6 +15,7 @@ import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { SettingsStackParamList } from '../navigation/types';
 import { useAppStore } from '../store/AppStoreContext';
 import { theme } from '../theme';
+import { useParentalGate } from '../hooks/useParentalGate';
 
 type Props = NativeStackScreenProps<SettingsStackParamList, 'ParentSettings'>;
 
@@ -24,6 +25,7 @@ export function ParentSettingsScreen({ navigation }: Props) {
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
   const [isAuthorized, setIsAuthorized] = useState(false);
+  const { requestParentalGate, ParentalGate } = useParentalGate();
 
   const hasPin = useMemo(() => Boolean(settings.parentPin), [settings.parentPin]);
 
@@ -54,7 +56,9 @@ export function ParentSettingsScreen({ navigation }: Props) {
     }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
+    const ok = await requestParentalGate();
+    if (!ok) return;
     const message = 'この操作は元に戻せません';
     if (Platform.OS === 'web') {
       const confirmed = typeof window !== 'undefined' && window.confirm ? window.confirm(message) : false;
@@ -77,9 +81,22 @@ export function ParentSettingsScreen({ navigation }: Props) {
     ]);
   };
 
+  const handleOpenFamilySharing = async () => {
+    const ok = await requestParentalGate();
+    if (!ok) return;
+    navigation.navigate('FamilySharing');
+  };
+
+  const handleOpenAppInfo = async () => {
+    const ok = await requestParentalGate();
+    if (!ok) return;
+    navigation.navigate('AppInfo');
+  };
+
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView style={styles.screen} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {ParentalGate}
         <View style={styles.headerRow}>
           <Pressable onPress={() => navigation.goBack()} style={styles.backButton}>
             <Text style={styles.backText}>‹ 戻る</Text>
@@ -137,7 +154,7 @@ export function ParentSettingsScreen({ navigation }: Props) {
             <View style={styles.card}>
               <Text style={styles.cardTitle}>家族共有（β）</Text>
               <Text style={styles.cardText}>データを書き出して他の端末で読み込めます。</Text>
-              <Pressable style={styles.primaryButton} onPress={() => navigation.navigate('FamilySharing')}>
+              <Pressable style={styles.primaryButton} onPress={handleOpenFamilySharing}>
                 <Text style={styles.primaryButtonText}>家族共有を開く</Text>
               </Pressable>
             </View>
@@ -167,6 +184,14 @@ export function ParentSettingsScreen({ navigation }: Props) {
               </Pressable>
               <Pressable style={[styles.primaryButton, styles.dangerButton]} onPress={handleReset}>
                 <Text style={styles.primaryButtonText}>すべてのデータをリセット</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>アプリ情報</Text>
+              <Text style={styles.cardText}>保護者向けの情報と外部リンク</Text>
+              <Pressable style={styles.primaryButton} onPress={handleOpenAppInfo}>
+                <Text style={styles.primaryButtonText}>アプリ情報を開く</Text>
               </Pressable>
             </View>
           </>

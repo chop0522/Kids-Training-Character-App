@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -16,9 +16,11 @@ import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useAppStore } from '../store/AppStoreContext';
 import { theme } from '../theme';
 import { PrimaryButton } from '../components/PrimaryButton';
+import { MediaAttachmentsEditor } from '../components/MediaAttachmentsEditor';
 import { calculateCoins, calculateXp, EffortLevel } from '../xp';
-import type { TrainingResult } from '../types';
+import type { MediaAttachment, TrainingResult } from '../types';
 import { buildTagFrequency, formatTag, normalizeTag, normalizeTags, parseTagsFromText, uniqueTags } from '../utils/tagUtils';
+import { nanoid } from 'nanoid/non-secure';
 
 type TrainingLogParamList = {
   TrainingLog: { childId: string };
@@ -40,8 +42,10 @@ export function TrainingLogScreen({ navigation, route }: Props) {
   const [note, setNote] = useState('');
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
+  const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [saving, setSaving] = useState(false);
   const [rewardResult, setRewardResult] = useState<TrainingResult | null>(null);
+  const draftSessionIdRef = useRef<string>(nanoid(10));
 
   useEffect(() => {
     if (activities.length > 0 && !activityId) {
@@ -97,6 +101,8 @@ export function TrainingLogScreen({ navigation, route }: Props) {
       effortLevel,
       note: note.trim() || undefined,
       tags: finalTags,
+      mediaAttachments: attachments,
+      sessionId: draftSessionIdRef.current,
     });
     setSaving(false);
     if (!result) {
@@ -104,6 +110,8 @@ export function TrainingLogScreen({ navigation, route }: Props) {
       return;
     }
     setRewardResult(result);
+    setAttachments([]);
+    draftSessionIdRef.current = nanoid(10);
   };
 
   if (!child) {
@@ -242,6 +250,16 @@ export function TrainingLogScreen({ navigation, route }: Props) {
               onChangeText={setNote}
               placeholder="感じたこと、できたことなど"
               placeholderTextColor={theme.colors.textDisabled}
+            />
+          </View>
+
+          <View style={styles.section}>
+            <Text style={styles.label}>写真・動画</Text>
+            <MediaAttachmentsEditor
+              attachments={attachments}
+              onChange={setAttachments}
+              context="create"
+              storageSessionId={draftSessionIdRef.current}
             />
           </View>
 

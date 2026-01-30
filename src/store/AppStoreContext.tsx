@@ -26,6 +26,7 @@ import {
   TreasureState,
   TrainingResult,
   TrainingSession,
+  MediaAttachment,
 } from '../types';
 import { clearPersistedState, loadPersistedState, savePersistedState } from '../storage/appStateStorage';
 import { applyXpToLevel, calculateCoins, calculateXp, EffortLevel, getMoodBonus } from '../xp';
@@ -79,9 +80,13 @@ export type AppStore = {
     effortLevel: EffortLevel;
     note?: string;
     tags?: string[];
+    mediaAttachments?: MediaAttachment[];
+    sessionId?: string;
   }) => TrainingResult | null;
   updateSessionNote: (sessionId: string, note: string) => void;
   updateSessionTags: (sessionId: string, tags: string[]) => void;
+  updateSessionAttachments: (sessionId: string, attachments: MediaAttachment[]) => void;
+  deleteTrainingSession: (sessionId: string) => { ok: true } | { ok: false };
   getMediaForSession: (sessionId: string) => Media[];
   addMediaToSession: (input: { sessionId: string; type: MediaType; localUri: string }) =>
     | { ok: true; mediaId: string }
@@ -327,11 +332,13 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     effortLevel: EffortLevel;
     note?: string;
     tags?: string[];
+    mediaAttachments?: MediaAttachment[];
+    sessionId?: string;
   }): TrainingResult | null => {
     let result: TrainingResult | null = null;
     setState((prev) => {
       if (!prev) return prev;
-      const { childId, activityId, durationMinutes, effortLevel, note } = input;
+      const { childId, activityId, durationMinutes, effortLevel, note, sessionId, mediaAttachments } = input;
       const now = new Date();
       const dateTimeIso = now.toISOString();
       const todayDate = getLocalDateKey(now);
@@ -358,6 +365,9 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         tickets: walletCategory.tickets + ticketsGained,
         ticketProgress: nextTicketProgress % SKIN_TICKET_PROGRESS_PER_TICKET,
       };
+      const walletCoinsDelta = updatedWalletCategory.coins - walletCategory.coins;
+      const walletTicketsDelta = updatedWalletCategory.tickets - walletCategory.tickets;
+      const walletTicketProgressDelta = updatedWalletCategory.ticketProgress - walletCategory.ticketProgress;
       const wallet = { ...prevWallet, [skinCategory]: updatedWalletCategory };
       const progress = {
         ...prevProgress,
@@ -406,7 +416,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
       const sessionTags = normalizeTags(input.tags);
       const newSession: TrainingSession = {
-        id: String(Date.now()),
+        id: sessionId ?? String(Date.now()),
         childId,
         activityId,
         date: dateTimeIso,
@@ -415,6 +425,13 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         effortLevel,
         xpGained,
         coinsGained,
+        mediaAttachments: normalizeAttachments(mediaAttachments),
+        skinCategory,
+        walletCoinsDelta,
+        walletTicketsDelta,
+        walletTicketProgressDelta,
+        treasureProgressDelta: 1,
+        buddyKey: activeBuddyKey,
         tags: sessionTags,
         note,
       };
@@ -530,8 +547,24 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const updateSessionAttachments = (sessionId: string, attachments: MediaAttachment[]) => {
+    const normalized = normalizeAttachments(attachments);
+    setState((prev) => {
+      if (!prev) return prev;
+      const sessions = prev.sessions.map((s) =>
+        s.id === sessionId ? { ...s, mediaAttachments: normalized } : s
+      );
+      const nextState: StoreState = { ...prev, sessions };
+      return nextState;
+    });
+  };
+
   const getMediaForSession = (sessionId: string) => {
     if (!state) return [];
+    const session = state.sessions.find((s) => s.id === sessionId);
+    if (session?.mediaAttachments && session.mediaAttachments.length > 0) {
+      return mapAttachmentsToMedia(session.mediaAttachments, sessionId);
+    }
     return state.mediaItems
       .filter((m) => m.sessionId === sessionId)
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
@@ -877,6 +910,115 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     return response;
   };
 
+  const deleteTrainingSession = (sessionId: string): { ok: true } | { ok: false } => {
+    let response: { ok: true } | { ok: false } = { ok: false };
+    setState((prev) => {
+      if (!prev) return prev;
+      const target = prev.sessions.find((session) => session.id === sessionId);
+      if (!target) return prev;
+      const nextSessions = prev.sessions.filter((session) => session.id !== sessionId);
+      const childId = target.childId;
+
+      const skinCategory = target.skinCategory ?? 'study';
+      const categoryTrainingCount = normalizeCategoryTrainingCount(prev.categoryTrainingCount);
+      if (skinCategory) {
+        categoryTrainingCount[skinCategory] = Math.max(0, categoryTrainingCount[skinCategory] - 1);
+      }
+      const progress = normalizeProgress(prev.progress);
+      if (skinCategory) {
+        progress[skinCategory].completedCount = Math.max(0, progress[skinCategory].completedCount - 1);
+      }
+
+      const wallet = normalizeWallet(prev.wallet);
+      const walletCategory = wallet[skinCategory];
+      const walletCoinsDelta = target.walletCoinsDelta ?? 0;
+      const walletTicketsDelta = target.walletTicketsDelta ?? 0;
+      const walletTicketProgressDelta = target.walletTicketProgressDelta ?? 0;
+      const updatedWalletCategory = {
+        ...walletCategory,
+        coins: Math.max(0, walletCategory.coins - walletCoinsDelta),
+        tickets: Math.max(0, walletCategory.tickets - walletTicketsDelta),
+        ticketProgress: clampNumber(
+          walletCategory.ticketProgress - walletTicketProgressDelta,
+          0,
+          SKIN_TICKET_PROGRESS_PER_TICKET - 1
+        ),
+      };
+      const updatedWallet: AppState['wallet'] = { ...wallet, [skinCategory]: updatedWalletCategory };
+
+      const treasure = normalizeTreasure(prev.treasure);
+      const treasureDelta = target.treasureProgressDelta ?? 1;
+      const updatedTreasure: TreasureState = {
+        ...treasure,
+        progress: Math.max(0, treasure.progress - treasureDelta),
+      };
+
+      const buddyKey = target.buddyKey ?? getActiveBuddyKey(prev, childId);
+      const prevBuddyProgress = getBuddyProgress(prev, childId, buddyKey);
+      const reducedBuddy = removeXpFromLevel(prevBuddyProgress.level, prevBuddyProgress.xp, target.xpGained ?? 0);
+      const updatedBuddyProgress: BuddyProgress = {
+        ...prevBuddyProgress,
+        level: reducedBuddy.level,
+        xp: reducedBuddy.xp,
+      };
+      const buddyProgressByChildId = {
+        ...prev.buddyProgressByChildId,
+        [childId]: {
+          ...(prev.buddyProgressByChildId[childId] ?? {}),
+          [buddyKey]: updatedBuddyProgress,
+        },
+      };
+
+      const activeBuddyKey = getActiveBuddyKey(prev, childId);
+      const activeProgress = buddyProgressByChildId[childId]?.[activeBuddyKey] ?? updatedBuddyProgress;
+      const children = prev.children.map((child) => {
+        if (child.id !== childId) return child;
+        return {
+          ...child,
+          level: activeProgress.level,
+          xp: activeProgress.xp,
+          coins: Math.max(0, child.coins - (target.coinsGained ?? 0)),
+          totalMinutes: Math.max(0, child.totalMinutes - target.durationMinutes),
+        };
+      });
+      const brainCharacters = prev.brainCharacters.map((brain) => {
+        if (brain.childId !== childId) return brain;
+        return {
+          ...brain,
+          level: activeProgress.level,
+          xp: activeProgress.xp,
+          skinId: activeBuddyKey,
+        };
+      });
+
+      const streakByChildId = buildStreakMap(nextSessions, prev.children);
+
+      const attachments = normalizeAttachments(target.mediaAttachments);
+      attachments.forEach((attachment) => {
+        void deleteFromAppStorageIfOwned(attachment.uri);
+      });
+
+      const mediaItems = prev.mediaItems.filter((item) => item.sessionId !== sessionId);
+
+      response = { ok: true };
+      return {
+        ...prev,
+        sessions: nextSessions,
+        mediaItems,
+        media: mediaItems,
+        wallet: updatedWallet,
+        progress,
+        categoryTrainingCount,
+        treasure: updatedTreasure,
+        buddyProgressByChildId,
+        children,
+        brainCharacters,
+        streakByChildId,
+      };
+    });
+    return response;
+  };
+
   const openTreasureChest = (input: { childId: string }) => {
     let response:
       | { result: 'ok'; rewards: TreasureReward[]; kind: TreasureKind; index: number }
@@ -1014,6 +1156,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         logTrainingSession,
         updateSessionNote,
         updateSessionTags,
+        updateSessionAttachments,
+        deleteTrainingSession,
         getMediaForSession,
         addMediaToSession: ({ type }) => ({
           ok: false,
@@ -1067,6 +1211,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       logTrainingSession,
       updateSessionNote,
       updateSessionTags,
+      updateSessionAttachments,
+      deleteTrainingSession,
       getMediaForSession,
       addMediaToSession,
       removeMedia,
@@ -1275,7 +1421,13 @@ function normalizeSessions(sessions?: TrainingSession[]): TrainingSession[] {
     ...session,
     dateKey: session.dateKey ?? getLocalDateKeyFromIso(session.date),
     tags: normalizeTags(Array.isArray(session.tags) ? session.tags : []),
+    mediaAttachments: normalizeAttachments(session.mediaAttachments),
   }));
+}
+
+function normalizeAttachments(attachments?: MediaAttachment[]): MediaAttachment[] {
+  if (!attachments) return [];
+  return attachments.filter((item) => Boolean(item?.id && item.uri && item.type));
 }
 
 function normalizeTreasure(treasure?: Partial<TreasureState>): TreasureState {
@@ -1590,6 +1742,39 @@ function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (safeMax - safeMin + 1)) + safeMin;
 }
 
+function removeXpFromLevel(
+  currentLevel: number,
+  currentXp: number,
+  removedXp: number
+): { level: number; xp: number } {
+  let level = Math.max(1, currentLevel);
+  let xp = Math.max(0, currentXp);
+  let remaining = Math.max(0, removedXp);
+
+  while (remaining > 0) {
+    if (xp >= remaining) {
+      xp -= remaining;
+      remaining = 0;
+      break;
+    }
+    remaining -= xp;
+    if (level <= 1) {
+      xp = 0;
+      remaining = 0;
+      break;
+    }
+    level -= 1;
+    xp = level * 100;
+  }
+
+  return { level, xp };
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
 function rollTreasureRewards(
   kind: TreasureKind,
   category: 'study' | 'exercise'
@@ -1640,6 +1825,19 @@ function pickSkinByWeight(pool: CharacterSkin[]): CharacterSkin {
     if (r <= acc) return w.skin;
   }
   return weighted[weighted.length - 1].skin;
+}
+
+function mapAttachmentsToMedia(attachments: MediaAttachment[], sessionId: string): Media[] {
+  return attachments
+    .map((attachment, index) => ({
+      id: attachment.id,
+      sessionId,
+      type: attachment.type === 'video' ? 'video' : 'photo',
+      localUri: attachment.uri,
+      createdAt: attachment.createdAtISO,
+      order: index,
+    }))
+    .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
 }
 
 function getOwnedSkinsForChildInternal(state: StoreState, childId: string): CharacterSkin[] {

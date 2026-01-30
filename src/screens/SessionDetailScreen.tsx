@@ -1,26 +1,13 @@
-import React, { useMemo, useState, useEffect } from 'react';
-import {
-  Alert,
-  Image,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
-import { ResizeMode, Video } from 'expo-av';
+import React, { useEffect, useState } from 'react';
+import { Alert, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useAppStore } from '../store/AppStoreContext';
 import { RecordStackParamList } from '../navigation/types';
 import { theme } from '../theme';
-import { MediaType } from '../types';
-import { PrimaryButton } from '../components/PrimaryButton';
-import { captureWithCamera, pickFromLibrary, requestMediaPermissions } from '../media/mediaService';
-import { copyIntoAppStorage, deleteFromAppStorageIfOwned } from '../media/localMediaStorage';
+import { MediaAttachment } from '../types';
 import { sortSessionsByDateAsc } from '../utils/sessionUtils';
 import { formatTag, parseTagsFromText, uniqueTags } from '../utils/tagUtils';
+import { MediaAttachmentsEditor } from '../components/MediaAttachmentsEditor';
 
 type Props = NativeStackScreenProps<RecordStackParamList, 'SessionDetail'>;
 
@@ -32,32 +19,19 @@ export function SessionDetailScreen({ route, navigation }: Props) {
     streakByChildId,
     getChildById,
     getSessionsForChild,
-    getMediaForSession,
-    addMediaToSession,
-    removeMedia,
     updateSessionNote,
     updateSessionTags,
+    updateSessionAttachments,
+    deleteTrainingSession,
   } = useAppStore();
 
   const child = getChildById(childId);
   const session = sessions.find((s) => s.id === sessionId);
   const activity = session ? activities.find((a) => a.id === session.activityId) : undefined;
-  const media = useMemo(() => getMediaForSession(sessionId), [getMediaForSession, sessionId, sessions]);
-
-  const [selectedMediaId, setSelectedMediaId] = useState<string | undefined>(undefined);
   const [noteDraft, setNoteDraft] = useState(session?.note ?? '');
   const [tagInput, setTagInput] = useState('');
   const [tagsDraft, setTagsDraft] = useState<string[]>(session?.tags ?? []);
-
-  useEffect(() => {
-    if (media.length === 0) {
-      setSelectedMediaId(undefined);
-      return;
-    }
-    const video = media.find((m) => m.type === 'video');
-    const firstMedia = video ?? media[0];
-    setSelectedMediaId((prev) => prev ?? firstMedia.id);
-  }, [media]);
+  const [attachments, setAttachments] = useState<MediaAttachment[]>(session?.mediaAttachments ?? []);
 
   useEffect(() => {
     setNoteDraft(session?.note ?? '');
@@ -66,6 +40,10 @@ export function SessionDetailScreen({ route, navigation }: Props) {
   useEffect(() => {
     setTagsDraft(session?.tags ?? []);
   }, [session?.tags]);
+
+  useEffect(() => {
+    setAttachments(session?.mediaAttachments ?? []);
+  }, [session?.mediaAttachments]);
 
   if (!child || !session || !activity) {
     return (
@@ -86,58 +64,8 @@ export function SessionDetailScreen({ route, navigation }: Props) {
   const prevSession = idx > 0 ? sortedAsc[idx - 1] : undefined;
   const nextSession = idx >= 0 && idx < sortedAsc.length - 1 ? sortedAsc[idx + 1] : undefined;
 
-  const selectedMedia = media.find((m) => m.id === selectedMediaId);
-  const hasVideo = media.some((m) => m.type === 'video');
-
-  const itemsForSession = media;
-  const photoCount = itemsForSession.filter((m) => m.type === 'photo').length;
-  const videoCount = itemsForSession.filter((m) => m.type === 'video').length;
-
   const streakInfo = streakByChildId[childId];
-
-  const handleMediaAction = async (source: 'camera' | 'library', type: MediaType) => {
-    const permission = await requestMediaPermissions(source);
-    if (!permission.ok) {
-      Alert.alert('権限が必要です', permission.reason ?? '権限がありません。');
-      return;
-    }
-
-    const picked =
-      source === 'camera' ? await captureWithCamera(type) : await pickFromLibrary(type);
-    if (!picked) return;
-
-    const stored = await copyIntoAppStorage({
-      sessionId,
-      type,
-      originalUri: picked.originalUri,
-      filenameHint: picked.filename,
-    });
-
-    const result = addMediaToSession({ sessionId, type, localUri: stored.storedUri });
-    if (!result.ok) {
-      const message =
-        result.reason === 'photo_limit'
-          ? '写真は1セッションにつき最大4枚までだよ'
-          : '動画は1セッションにつき最大2本までだよ';
-      Alert.alert('追加できません', message);
-      if (stored.storedUri !== picked.originalUri) {
-        deleteFromAppStorageIfOwned(stored.storedUri).catch(() => {});
-      }
-      return;
-    }
-
-    setSelectedMediaId(result.mediaId);
-  };
-
-  const handleAddMedia = () => {
-    Alert.alert('写真・動画を追加', '追加方法を選んでください', [
-      { text: '写真を撮る', onPress: () => handleMediaAction('camera', 'photo') },
-      { text: '写真を選ぶ', onPress: () => handleMediaAction('library', 'photo') },
-      { text: '動画を撮る', onPress: () => handleMediaAction('camera', 'video') },
-      { text: '動画を選ぶ', onPress: () => handleMediaAction('library', 'video') },
-      { text: 'キャンセル', style: 'cancel' },
-    ]);
-  };
+  const hasVideo = attachments.some((item) => item.type === 'video');
 
   const effortStars = '★'.repeat(session.effortLevel);
 
@@ -154,6 +82,33 @@ export function SessionDetailScreen({ route, navigation }: Props) {
     const nextTags = tagsDraft.filter((item) => item !== tag);
     setTagsDraft(nextTags);
     updateSessionTags(sessionId, nextTags);
+  };
+
+  const handleAttachmentsChange = (next: MediaAttachment[]) => {
+    setAttachments(next);
+    updateSessionAttachments(sessionId, next);
+  };
+
+  const handleDeleteSession = () => {
+    Alert.alert(
+      '記録を削除',
+      'この記録を削除します。獲得したXP/コイン/進捗も取り消されます。よろしいですか？',
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: '削除',
+          style: 'destructive',
+          onPress: () => {
+            const res = deleteTrainingSession(sessionId);
+            if (res.ok) {
+              navigation.goBack();
+            } else {
+              Alert.alert('削除できませんでした');
+            }
+          },
+        },
+      ]
+    );
   };
 
   return (
@@ -218,55 +173,14 @@ export function SessionDetailScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        <View style={styles.mainMediaContainer}>
-          {selectedMedia ? (
-            selectedMedia.type === 'photo' ? (
-              <Image source={{ uri: selectedMedia.localUri }} style={styles.mainImage} />
-            ) : (
-              <Video
-                source={{ uri: selectedMedia.localUri }}
-                style={styles.mainVideo}
-                useNativeControls
-                resizeMode={ResizeMode.CONTAIN}
-              />
-            )
-          ) : (
-            <View style={styles.mainMediaPlaceholder}>
-              <Text style={styles.mainMediaPlaceholderText}>まだ写真・動画がありません</Text>
-            </View>
-          )}
-          <PrimaryButton title="写真・動画を追加する" onPress={handleAddMedia} />
-          <Text style={styles.mediaLimitText}>
-            写真 {photoCount}/4 · 動画 {videoCount}/2
-          </Text>
-        </View>
-
-        <View style={styles.thumbnailStrip}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.thumbnailScroll}>
-            {media.map((item) => {
-              const isSelected = item.id === selectedMediaId;
-              const isVideo = item.type === 'video';
-              return (
-                <Pressable
-                  key={item.id}
-                  onPress={() => setSelectedMediaId(item.id)}
-                  onLongPress={() => removeMedia(item.id)}
-                  style={[styles.thumbnailItem, isSelected && styles.thumbnailItemSelected]}
-                >
-                  {isVideo ? (
-                    <View style={styles.videoThumb}>
-                      <Text style={styles.videoIcon}>▶</Text>
-                    </View>
-                  ) : (
-                    <Image source={{ uri: item.localUri }} style={styles.thumbnailImage} />
-                  )}
-                  <Pressable style={styles.removeBadge} onPress={() => removeMedia(item.id)}>
-                    <Text style={styles.removeBadgeText}>×</Text>
-                  </Pressable>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+        <View style={styles.mediaCard}>
+          <Text style={styles.mediaTitle}>写真・動画</Text>
+          <MediaAttachmentsEditor
+            attachments={attachments}
+            onChange={handleAttachmentsChange}
+            context="detail"
+            storageSessionId={sessionId}
+          />
         </View>
 
         <View style={styles.noteCard}>
@@ -329,6 +243,10 @@ export function SessionDetailScreen({ route, navigation }: Props) {
             <Text style={styles.compareHintText}>前回の記録がまだありません</Text>
           )}
         </View>
+
+        <Pressable style={styles.deleteButton} onPress={handleDeleteSession}>
+          <Text style={styles.deleteButtonText}>この記録を削除</Text>
+        </Pressable>
 
         <View style={styles.statusCard}>
           <Text style={styles.statusTitle}>もらったXP/コイン</Text>
@@ -483,6 +401,18 @@ const styles = StyleSheet.create({
     ...theme.typography.caption,
     color: theme.colors.textSub,
     marginTop: theme.spacing.sm,
+  },
+  mediaCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    ...theme.shadows.card,
+  },
+  mediaTitle: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+    marginBottom: theme.spacing.sm,
   },
   mainMediaContainer: {
     backgroundColor: theme.colors.surface,
@@ -658,5 +588,16 @@ const styles = StyleSheet.create({
   compareHintText: {
     ...theme.typography.body,
     color: theme.colors.textSub,
+  },
+  deleteButton: {
+    backgroundColor: theme.colors.danger,
+    borderRadius: theme.radius.lg,
+    paddingVertical: theme.spacing.sm,
+    alignItems: 'center',
+    marginBottom: theme.spacing.md,
+  },
+  deleteButtonText: {
+    ...theme.typography.label,
+    color: '#fff',
   },
 });

@@ -41,6 +41,19 @@ export type Activity = {
 
 export type EffortLevel = 1 | 2 | 3;
 
+export type MediaAttachment = {
+  id: string;
+  type: 'image' | 'video';
+  uri: string;
+  mimeType?: string;
+  createdAtISO: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  source?: 'camera' | 'library' | 'file';
+  fileName?: string;
+};
+
 export type TrainingSession = {
   id: string;
   childId: string;
@@ -51,6 +64,13 @@ export type TrainingSession = {
   effortLevel: EffortLevel;
   xpGained: number;
   coinsGained: number;
+  mediaAttachments?: MediaAttachment[];
+  skinCategory?: 'study' | 'exercise';
+  walletCoinsDelta?: number;
+  walletTicketsDelta?: number;
+  walletTicketProgressDelta?: number;
+  treasureProgressDelta?: number;
+  buddyKey?: string;
   tags: string[];
   note?: string;
 };
