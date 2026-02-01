@@ -34,7 +34,7 @@
       "favicon": "./assets/favicon.png"
     },
     "extra": {
-      "publicWebBaseUrl": "https://chop0522.github.io/dotworks/"
+      "publicWebBaseUrl": "https://chop0522.github.io/Kids-Training-Character-App/"
     },
     "plugins": [
       "expo-web-browser"
