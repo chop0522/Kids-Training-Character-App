@@ -6,6 +6,14 @@ export type BackupManifest = {
   exportedAtISO: string;
   appName: string;
   appVersion: string;
+  childrenCount: number;
+  sessionsCount: number;
+  mediaCount: {
+    image: number;
+    video: number;
+  };
+  missingMediaCount: number;
+  totalMediaBytes: number;
 };
 
 export type BackupData = {
@@ -19,6 +27,8 @@ export type BackupStats = {
   imageCount: number;
   videoCount: number;
   totalMediaBytes: number;
+  missingMediaCount?: number;
+  missingMediaUris?: string[];
 };
 
 export type BackupCreateResult = {

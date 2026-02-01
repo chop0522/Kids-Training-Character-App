@@ -16,6 +16,7 @@ import {
   getMediaFileExtension,
   makeMediaZipPath,
   readUriAsUint8Array,
+  sanitizeState,
   writeBytesToFile,
 } from './backupUtils';
 import type { BackupCreateResult, BackupInspectResult, BackupManifest, BackupRestoreResult } from './backupTypes';
@@ -32,7 +33,7 @@ function getAppVersion(): string {
 }
 
 function getSanitizedState(state: AppStoreState): Partial<AppStoreState> {
-  return buildSharePackage({ state }).state;
+  return sanitizeState(buildSharePackage({ state }).state);
 }
 
 function normalizeAttachments(attachments: MediaAttachment[] | undefined): MediaAttachment[] {
@@ -63,26 +64,20 @@ export async function createBackupZip(input: {
 }): Promise<BackupCreateResult> {
   const exportedAtISO = new Date().toISOString();
   const fileName = buildBackupFileName(new Date(exportedAtISO));
-  const manifest: BackupManifest = {
-    schemaVersion: BACKUP_SCHEMA_VERSION,
-    backupFormatVersion: BACKUP_FORMAT_VERSION,
-    exportedAtISO,
-    appName: getAppName(),
-    appVersion: getAppVersion(),
-  };
-
   const sanitized = getSanitizedState(input.state);
   const stateCopy = JSON.parse(JSON.stringify(sanitized)) as Partial<AppStoreState>;
   const sessions = stateCopy.sessions ?? [];
 
   const filesMap: Record<string, Uint8Array> = {
-    'manifest.json': strToU8(JSON.stringify(manifest)),
+    'manifest.json': strToU8(JSON.stringify({})),
   };
 
   let attachmentsCount = 0;
   let imageCount = 0;
   let videoCount = 0;
   let totalMediaBytes = 0;
+  let missingMediaCount = 0;
+  const missingMediaUris: string[] = [];
 
   if (input.includeMedia) {
     for (const session of sessions) {
@@ -90,11 +85,26 @@ export async function createBackupZip(input: {
       const nextAttachments: MediaAttachment[] = [];
       for (const attachment of normalized) {
         try {
+          if (attachment.uri?.startsWith('file://')) {
+            const info = await FileSystem.getInfoAsync(attachment.uri, { size: true });
+            if (!info.exists) {
+              missingMediaCount += 1;
+              missingMediaUris.push(attachment.uri);
+              continue;
+            }
+            if (typeof info.size === 'number') {
+              totalMediaBytes += info.size;
+              if (info.size >= 50 * 1024 * 1024) {
+                missingMediaCount += 1;
+                missingMediaUris.push(attachment.uri);
+                continue;
+              }
+            }
+          }
           const extension = getMediaFileExtension(attachment);
           const zipPath = makeMediaZipPath(attachment.id, extension);
           const bytes = await readUriAsUint8Array(attachment.uri);
           filesMap[zipPath] = bytes;
-          totalMediaBytes += bytes.byteLength;
           attachmentsCount += 1;
           if (attachment.type === 'video') {
             videoCount += 1;
@@ -107,6 +117,8 @@ export async function createBackupZip(input: {
           });
         } catch (e) {
           // Skip attachment if reading fails
+          missingMediaCount += 1;
+          if (attachment.uri) missingMediaUris.push(attachment.uri);
         }
       }
       session.mediaAttachments = nextAttachments;
@@ -119,6 +131,19 @@ export async function createBackupZip(input: {
 
   const dataPayload = { state: stateCopy };
   filesMap['data.json'] = strToU8(JSON.stringify(dataPayload));
+  const manifest: BackupManifest = {
+    schemaVersion: BACKUP_SCHEMA_VERSION,
+    backupFormatVersion: BACKUP_FORMAT_VERSION,
+    exportedAtISO,
+    appName: getAppName(),
+    appVersion: getAppVersion(),
+    childrenCount: stateCopy.children?.length ?? 0,
+    sessionsCount: stateCopy.sessions?.length ?? 0,
+    mediaCount: { image: imageCount, video: videoCount },
+    missingMediaCount,
+    totalMediaBytes,
+  };
+  filesMap['manifest.json'] = strToU8(JSON.stringify(manifest));
 
   const zipped = zipSync(filesMap, { level: 6 });
   let uri: string | undefined;
@@ -138,6 +163,9 @@ export async function createBackupZip(input: {
     videoCount,
     totalMediaBytes,
   });
+  if (__DEV__ && missingMediaCount > 0) {
+    console.warn('Missing media excluded from backup', missingMediaCount, missingMediaUris);
+  }
 
   return {
     uri,
@@ -145,7 +173,11 @@ export async function createBackupZip(input: {
     fileName,
     sizeBytes: zipped.byteLength,
     exportedAtISO,
-    stats,
+    stats: {
+      ...stats,
+      missingMediaCount,
+      missingMediaUris,
+    },
   };
 }
 
@@ -165,7 +197,7 @@ export async function inspectBackupZip(input: { uri?: string; data?: Uint8Array 
     throw new Error('backup_version_mismatch');
   }
   const parsed = JSON.parse(strFromU8(dataRaw));
-  const state = (parsed?.state ?? parsed) as Partial<AppStoreState>;
+  const state = sanitizeState((parsed?.state ?? parsed) as Partial<AppStoreState>);
 
   let attachmentsCount = 0;
   let imageCount = 0;
@@ -187,10 +219,10 @@ export async function inspectBackupZip(input: { uri?: string; data?: Uint8Array 
     attachmentsCount,
     imageCount,
     videoCount,
-    totalMediaBytes: 0,
+    totalMediaBytes: manifest.totalMediaBytes ?? 0,
   });
 
-  return { manifest, dataState: state, stats };
+  return { manifest, dataState: state, stats: { ...stats, missingMediaCount: manifest.missingMediaCount ?? 0 } };
 }
 
 export async function restoreBackupZip(input: {
@@ -213,7 +245,7 @@ export async function restoreBackupZip(input: {
     throw new Error('backup_version_mismatch');
   }
   const parsed = JSON.parse(strFromU8(dataRaw));
-  const state = (parsed?.state ?? parsed) as Partial<AppStoreState>;
+  const state = sanitizeState((parsed?.state ?? parsed) as Partial<AppStoreState>);
 
   let attachmentsCount = 0;
   let imageCount = 0;
@@ -271,5 +303,5 @@ export async function restoreBackupZip(input: {
     totalMediaBytes: 0,
   });
 
-  return { state, stats };
+  return { state: sanitizeState(state), stats: { ...stats, missingMediaCount: manifest.missingMediaCount ?? 0 } };
 }

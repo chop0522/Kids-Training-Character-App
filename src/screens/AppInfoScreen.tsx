@@ -1,11 +1,12 @@
 import React from 'react';
-import { Linking, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Constants from 'expo-constants';
+import * as WebBrowser from 'expo-web-browser';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { SettingsStackParamList } from '../navigation/types';
 import { theme } from '../theme';
-import { PRIVACY_POLICY_URL, SUPPORT_URL, TERMS_URL } from '../constants/appLinks';
 import { useParentalGate } from '../hooks/useParentalGate';
+import { buildPublicWebUrl, getPublicWebBaseUrl, PUBLIC_WEB_PATHS } from '../config/publicWeb';
 
 type Props = NativeStackScreenProps<SettingsStackParamList, 'AppInfo'>;
 
@@ -13,11 +14,19 @@ export function AppInfoScreen({ navigation }: Props) {
   const { requestParentalGate, ParentalGate } = useParentalGate();
   const appName = Constants.expoConfig?.name ?? 'がんばりアルバム';
   const appVersion = Constants.expoConfig?.version ?? '1.0.0';
+  const baseUrl = getPublicWebBaseUrl();
+  const hasBaseUrl = Boolean(baseUrl);
 
   const openExternal = async (url: string) => {
     const ok = await requestParentalGate();
     if (!ok) return;
-    Linking.openURL(url).catch(() => {});
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined') {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      return;
+    }
+    await WebBrowser.openBrowserAsync(url);
   };
 
   return (
@@ -40,15 +49,30 @@ export function AppInfoScreen({ navigation }: Props) {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>外部リンク</Text>
-          <Pressable style={styles.linkButton} onPress={() => openExternal(PRIVACY_POLICY_URL)}>
+          <Pressable
+            style={[styles.linkButton, !hasBaseUrl && styles.linkButtonDisabled]}
+            onPress={() => openExternal(buildPublicWebUrl(PUBLIC_WEB_PATHS.privacy))}
+            disabled={!hasBaseUrl}
+          >
             <Text style={styles.linkButtonText}>プライバシーポリシー</Text>
           </Pressable>
-          <Pressable style={styles.linkButton} onPress={() => openExternal(TERMS_URL)}>
+          <Pressable
+            style={[styles.linkButton, !hasBaseUrl && styles.linkButtonDisabled]}
+            onPress={() => openExternal(buildPublicWebUrl(PUBLIC_WEB_PATHS.terms))}
+            disabled={!hasBaseUrl}
+          >
             <Text style={styles.linkButtonText}>利用規約</Text>
           </Pressable>
-          <Pressable style={styles.linkButton} onPress={() => openExternal(SUPPORT_URL)}>
+          <Pressable
+            style={[styles.linkButton, !hasBaseUrl && styles.linkButtonDisabled]}
+            onPress={() => openExternal(buildPublicWebUrl(PUBLIC_WEB_PATHS.support))}
+            disabled={!hasBaseUrl}
+          >
             <Text style={styles.linkButtonText}>サポート/お問い合わせ</Text>
           </Pressable>
+          {!hasBaseUrl ? (
+            <Text style={styles.helperText}>外部URL未設定（GitHub Pages公開後に設定してください）</Text>
+          ) : null}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -113,5 +137,13 @@ const styles = StyleSheet.create({
   linkButtonText: {
     ...theme.typography.label,
     color: '#fff',
+  },
+  linkButtonDisabled: {
+    opacity: 0.5,
+  },
+  helperText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    marginTop: theme.spacing.xs,
   },
 });

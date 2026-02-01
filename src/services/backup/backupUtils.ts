@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system';
 import { Platform } from 'react-native';
 import { fromByteArray, toByteArray } from 'base64-js';
+import type { AppStoreState } from '../../store/AppStoreContext';
 import type { MediaAttachment } from '../../types';
 
 export const BACKUP_SCHEMA_VERSION = 1;
@@ -119,5 +120,27 @@ export function buildStatsSummary(state: { children?: unknown[]; sessions?: unkn
     imageCount: stats.imageCount,
     videoCount: stats.videoCount,
     totalMediaBytes: stats.totalMediaBytes,
+  };
+}
+
+export function sanitizeState(state: Partial<AppStoreState>): Partial<AppStoreState> {
+  const children = state.children ?? [];
+  const validIds = new Set(children.map((child) => child.id));
+  const filterByChildId = <T extends Record<string, unknown>>(input: T | undefined) => {
+    if (!input) return input;
+    const next: Record<string, unknown> = {};
+    Object.keys(input).forEach((key) => {
+      if (validIds.has(key)) {
+        next[key] = input[key];
+      }
+    });
+    return next as T;
+  };
+  return {
+    ...state,
+    activeBuddyKeyByChildId: filterByChildId(state.activeBuddyKeyByChildId),
+    buddyProgressByChildId: filterByChildId(state.buddyProgressByChildId),
+    discoveredFormIdsByChildId: filterByChildId(state.discoveredFormIdsByChildId),
+    streakByChildId: filterByChildId(state.streakByChildId),
   };
 }

@@ -1,5 +1,16 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Platform,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  View,
+} from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Sharing from 'expo-sharing';
@@ -16,8 +27,10 @@ type Props = NativeStackScreenProps<SettingsStackParamList, 'FamilySharing'>;
 export function FamilySharingScreen({ navigation }: Props) {
   const { appState, importSharedState } = useAppStore();
   const [isBusy, setIsBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [lastExportedAt, setLastExportedAt] = useState<string | null>(null);
   const [includeMedia, setIncludeMedia] = useState(true);
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
   const { requestParentalGate, ParentalGate } = useParentalGate();
 
   const lastExportText = useMemo(() => {
@@ -33,6 +46,8 @@ export function FamilySharingScreen({ navigation }: Props) {
       return;
     }
     setIsBusy(true);
+    setBusyLabel('作成中…');
+    setExportWarning(null);
     try {
       if (includeMedia) {
         const estimatedBytes = await estimateBackupMediaBytes(appState);
@@ -62,10 +77,16 @@ export function FamilySharingScreen({ navigation }: Props) {
         await Sharing.shareAsync(result.uri, { mimeType: 'application/zip' });
       }
       setLastExportedAt(result.exportedAtISO);
+      if (result.stats.missingMediaCount && result.stats.missingMediaCount > 0) {
+        const warningText = `見つからない写真/動画が ${result.stats.missingMediaCount} 件あったため除外しました。`;
+        setExportWarning(warningText);
+        Alert.alert('一部のメディアを除外しました', warningText);
+      }
     } catch (e) {
       Alert.alert('書き出しに失敗しました', 'もう一度お試しください。');
     } finally {
       setIsBusy(false);
+      setBusyLabel(null);
     }
   };
 
@@ -73,12 +94,29 @@ export function FamilySharingScreen({ navigation }: Props) {
     const ok = await requestParentalGate();
     if (!ok) return;
     setIsBusy(true);
+    setBusyLabel('復元中…');
     try {
       const picked = await pickBackupZip();
       if (!picked) return;
       const preview = await inspectBackupZip(picked);
-      const summaryText = formatBackupSummary(preview.stats);
+      const summaryText = formatBackupSummary(preview.stats, preview.manifest);
       const message = `${summaryText}\n\n読み込むとこの端末のデータは上書きされます。`;
+      if (preview.manifest.totalMediaBytes >= 200 * 1024 * 1024) {
+        const sizeWarning = 'バックアップのサイズが大きいため、復元に時間がかかる場合があります。';
+        if (Platform.OS === 'web') {
+          const continueLarge =
+            typeof window !== 'undefined' && window.confirm ? window.confirm(`${sizeWarning}\n続行しますか？`) : false;
+          if (!continueLarge) return;
+        } else {
+          const continueLarge = await new Promise<boolean>((resolve) => {
+            Alert.alert('サイズ警告', sizeWarning, [
+              { text: 'キャンセル', style: 'cancel', onPress: () => resolve(false) },
+              { text: '続行', onPress: () => resolve(true) },
+            ]);
+          });
+          if (!continueLarge) return;
+        }
+      }
       if (Platform.OS === 'web') {
         const confirmed = typeof window !== 'undefined' && window.confirm ? window.confirm(message) : false;
         if (!confirmed) return;
@@ -97,12 +135,16 @@ export function FamilySharingScreen({ navigation }: Props) {
           onPress: async () => {
             const restored = await restoreBackupZip(picked);
             importSharedState(restored.state);
-            Alert.alert('読み込み完了', 'データを読み込みました。');
+            Alert.alert(
+              '読み込み完了',
+              `子ども${restored.stats.childrenCount} / 記録${restored.stats.sessionsCount} / 写真${restored.stats.imageCount} / 動画${restored.stats.videoCount}`
+            );
           },
         },
       ]);
     } finally {
       setIsBusy(false);
+      setBusyLabel(null);
     }
   };
 
@@ -122,6 +164,7 @@ export function FamilySharingScreen({ navigation }: Props) {
           <Text style={styles.cardText}>この機能はデータを書き出して、別の端末で読み込む方式です。</Text>
           <Text style={styles.cardText}>写真/動画を含めるとサイズが大きくなる場合があります。</Text>
           <Text style={styles.cardText}>PINは共有されません（端末ごと）</Text>
+          {exportWarning ? <Text style={styles.cardWarning}>{exportWarning}</Text> : null}
         </View>
 
         <View style={styles.card}>
@@ -152,6 +195,13 @@ export function FamilySharingScreen({ navigation }: Props) {
             <Text style={styles.secondaryButtonText}>バックアップを読み込む</Text>
           </Pressable>
         </View>
+
+        {isBusy ? (
+          <View style={styles.busyRow}>
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+            <Text style={styles.busyText}>{busyLabel ?? '処理中…'}</Text>
+          </View>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );
@@ -175,17 +225,25 @@ async function pickBackupZip(): Promise<{ uri?: string; data?: Uint8Array; fileN
   return uri ? { uri } : null;
 }
 
-function formatBackupSummary(summary: {
-  childrenCount: number;
-  sessionsCount: number;
-  attachmentsCount: number;
-  imageCount: number;
-  videoCount: number;
-}) {
+function formatBackupSummary(
+  summary: {
+    childrenCount: number;
+    sessionsCount: number;
+    attachmentsCount: number;
+    imageCount: number;
+    videoCount: number;
+    missingMediaCount?: number;
+  },
+  manifest: { totalMediaBytes: number }
+) {
+  const sizeMb = manifest.totalMediaBytes ? Math.round(manifest.totalMediaBytes / (1024 * 1024)) : 0;
+  const missing = summary.missingMediaCount ?? 0;
   return [
     `子ども: ${summary.childrenCount}人`,
     `記録: ${summary.sessionsCount}件`,
     `添付: ${summary.attachmentsCount}件（写真${summary.imageCount} / 動画${summary.videoCount}）`,
+    `欠損: ${missing}件`,
+    `推定サイズ: ${sizeMb}MB`,
   ].join('\n');
 }
 
@@ -249,11 +307,27 @@ const styles = StyleSheet.create({
     color: theme.colors.textSub,
     marginTop: theme.spacing.xs,
   },
+  cardWarning: {
+    ...theme.typography.caption,
+    color: theme.colors.warning ?? '#C77700',
+    marginTop: theme.spacing.xs,
+  },
   switchRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginTop: theme.spacing.xs,
+  },
+  busyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: theme.spacing.md,
+  },
+  busyText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    marginLeft: theme.spacing.sm,
   },
   primaryButton: {
     backgroundColor: theme.colors.primary,
