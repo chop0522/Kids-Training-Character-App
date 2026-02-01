@@ -34,7 +34,7 @@
       "favicon": "./assets/favicon.png"
     },
     "extra": {
-      "publicWebBaseUrl": "https://YOUR_GITHUB_NAME.github.io/YOUR_REPO_NAME"
+      "publicWebBaseUrl": "https://chop0522.github.io/dotworks/"
     },
     "plugins": [
       "expo-web-browser"
