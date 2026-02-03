@@ -7,6 +7,7 @@ import { SettingsStackParamList } from '../navigation/types';
 import { theme } from '../theme';
 import { useParentalGate } from '../hooks/useParentalGate';
 import { buildPublicWebUrl, getPublicWebBaseUrl, PUBLIC_WEB_PATHS } from '../config/publicWeb';
+import { CONTACT_EMAIL } from '../config/legal';
 
 type Props = NativeStackScreenProps<SettingsStackParamList, 'AppInfo'>;
 
@@ -45,6 +46,21 @@ export function AppInfoScreen({ navigation }: Props) {
           <Text style={styles.value}>{appName}</Text>
           <Text style={styles.label}>バージョン</Text>
           <Text style={styles.value}>{appVersion}</Text>
+          <Text style={styles.label}>お問い合わせ</Text>
+          <Text style={styles.value}>{CONTACT_EMAIL}</Text>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>アプリ内文書</Text>
+          <Pressable style={styles.linkButton} onPress={() => navigation.navigate('LegalDocument', { type: 'privacy' })}>
+            <Text style={styles.linkButtonText}>プライバシーポリシー</Text>
+          </Pressable>
+          <Pressable style={styles.linkButton} onPress={() => navigation.navigate('LegalDocument', { type: 'terms' })}>
+            <Text style={styles.linkButtonText}>利用規約</Text>
+          </Pressable>
+          <Pressable style={styles.linkButton} onPress={() => navigation.navigate('LegalDocument', { type: 'support' })}>
+            <Text style={styles.linkButtonText}>サポート/お問い合わせ</Text>
+          </Pressable>
         </View>
 
         <View style={styles.card}>

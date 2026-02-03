@@ -21,6 +21,8 @@ import { useParentalGate } from '../hooks/useParentalGate';
 import { pickMediaFilesWeb } from '../utils/webFilePicker';
 import { createBackupZip, estimateBackupMediaBytes, inspectBackupZip, restoreBackupZip } from '../services/backup/backupService';
 import { downloadBytesAsFile } from '../services/backup/backupUtils';
+import type { BackupInspectResult } from '../services/backup/backupTypes';
+import { mergeAppStates } from '../services/backup/mergeUtils';
 
 type Props = NativeStackScreenProps<SettingsStackParamList, 'FamilySharing'>;
 
@@ -31,6 +33,11 @@ export function FamilySharingScreen({ navigation }: Props) {
   const [lastExportedAt, setLastExportedAt] = useState<string | null>(null);
   const [includeMedia, setIncludeMedia] = useState(true);
   const [exportWarning, setExportWarning] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<{
+    picked: { uri?: string; data?: Uint8Array; fileName?: string };
+    preview: BackupInspectResult;
+  } | null>(null);
+  const [showAllMissing, setShowAllMissing] = useState(false);
   const { requestParentalGate, ParentalGate } = useParentalGate();
 
   const lastExportText = useMemo(() => {
@@ -94,13 +101,11 @@ export function FamilySharingScreen({ navigation }: Props) {
     const ok = await requestParentalGate();
     if (!ok) return;
     setIsBusy(true);
-    setBusyLabel('復元中…');
+    setBusyLabel('読み込み中…');
     try {
       const picked = await pickBackupZip();
       if (!picked) return;
       const preview = await inspectBackupZip(picked);
-      const summaryText = formatBackupSummary(preview.stats, preview.manifest);
-      const message = `${summaryText}\n\n読み込むとこの端末のデータは上書きされます。`;
       if (preview.manifest.totalMediaBytes >= 200 * 1024 * 1024) {
         const sizeWarning = 'バックアップのサイズが大きいため、復元に時間がかかる場合があります。';
         if (Platform.OS === 'web') {
@@ -117,31 +122,31 @@ export function FamilySharingScreen({ navigation }: Props) {
           if (!continueLarge) return;
         }
       }
-      if (Platform.OS === 'web') {
-        const confirmed = typeof window !== 'undefined' && window.confirm ? window.confirm(message) : false;
-        if (!confirmed) return;
-        const restored = await restoreBackupZip(picked);
-        importSharedState(restored.state);
-        if (typeof window !== 'undefined' && window.alert) {
-          window.alert('読み込みが完了しました。');
-        }
-        return;
-      }
-      Alert.alert('読み込み確認', message, [
-        { text: 'キャンセル', style: 'cancel' },
-        {
-          text: '読み込む（上書き）',
-          style: 'destructive',
-          onPress: async () => {
-            const restored = await restoreBackupZip(picked);
-            importSharedState(restored.state);
-            Alert.alert(
-              '読み込み完了',
-              `子ども${restored.stats.childrenCount} / 記録${restored.stats.sessionsCount} / 写真${restored.stats.imageCount} / 動画${restored.stats.videoCount}`
-            );
-          },
-        },
-      ]);
+      setPendingImport({ picked, preview });
+      setShowAllMissing(false);
+    } finally {
+      setIsBusy(false);
+      setBusyLabel(null);
+    }
+  };
+
+  const handleApplyImport = async (mode: 'replace' | 'merge') => {
+    if (!pendingImport) return;
+    if (!appState) {
+      Alert.alert('読み込みできません', 'データの読み込み中です。しばらくお待ちください。');
+      return;
+    }
+    setIsBusy(true);
+    setBusyLabel('復元中…');
+    try {
+      const restored = await restoreBackupZip(pendingImport.picked);
+      const nextState = mode === 'merge' ? mergeAppStates(appState, restored.state) : restored.state;
+      importSharedState(nextState);
+      setPendingImport(null);
+      Alert.alert(
+        '読み込み完了',
+        `子ども${restored.stats.childrenCount} / 記録${restored.stats.sessionsCount} / 写真${restored.stats.imageCount} / 動画${restored.stats.videoCount}`
+      );
     } finally {
       setIsBusy(false);
       setBusyLabel(null);
@@ -196,6 +201,35 @@ export function FamilySharingScreen({ navigation }: Props) {
           </Pressable>
         </View>
 
+        {pendingImport ? (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>読み込み内容の確認</Text>
+            <Text style={styles.cardText}>{formatBackupSummary(pendingImport.preview.stats, pendingImport.preview.manifest)}</Text>
+            {renderMissingList(pendingImport.preview.missingMediaPaths, showAllMissing, setShowAllMissing)}
+            <Text style={styles.cardText}>読み込むとこの端末のデータは上書きされます。</Text>
+            <Pressable
+              style={[styles.primaryButton, isBusy && styles.buttonDisabled]}
+              onPress={() => handleApplyImport('replace')}
+              disabled={isBusy}
+            >
+              <Text style={styles.primaryButtonText}>上書きして読み込む</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.secondaryButton, isBusy && styles.buttonDisabled]}
+              onPress={() => handleApplyImport('merge')}
+              disabled={isBusy}
+            >
+              <Text style={styles.secondaryButtonText}>マージ（追加）※β</Text>
+            </Pressable>
+            <Pressable style={styles.textButton} onPress={() => setPendingImport(null)} disabled={isBusy}>
+              <Text style={styles.textButtonText}>キャンセル</Text>
+            </Pressable>
+            <Text style={styles.cardSubText}>
+              既存データは残し、新しいデータだけ追加します。重複がある場合は追加しません。
+            </Text>
+          </View>
+        ) : null}
+
         {isBusy ? (
           <View style={styles.busyRow}>
             <ActivityIndicator size="small" color={theme.colors.primary} />
@@ -245,6 +279,30 @@ function formatBackupSummary(
     `欠損: ${missing}件`,
     `推定サイズ: ${sizeMb}MB`,
   ].join('\n');
+}
+
+function renderMissingList(
+  missing: string[] | undefined,
+  showAll: boolean,
+  setShowAll: (value: boolean) => void
+) {
+  if (!missing || missing.length === 0) return null;
+  const visible = showAll ? missing : missing.slice(0, 20);
+  return (
+    <View style={styles.missingBox}>
+      <Text style={styles.missingTitle}>欠損ファイル</Text>
+      {visible.map((path) => (
+        <Text key={path} style={styles.missingItem}>
+          {path}
+        </Text>
+      ))}
+      {missing.length > 20 ? (
+        <Pressable onPress={() => setShowAll(!showAll)} style={styles.textButton}>
+          <Text style={styles.textButtonText}>{showAll ? '折りたたむ' : 'すべて表示'}</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
 }
 
 function formatDateTime(iso: string) {
@@ -312,6 +370,23 @@ const styles = StyleSheet.create({
     color: theme.colors.warning ?? '#C77700',
     marginTop: theme.spacing.xs,
   },
+  missingBox: {
+    borderColor: theme.colors.warning ?? '#C77700',
+    borderWidth: 1,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.sm,
+    marginTop: theme.spacing.sm,
+    backgroundColor: '#FFF6E5',
+  },
+  missingTitle: {
+    ...theme.typography.caption,
+    color: theme.colors.warning ?? '#C77700',
+    marginBottom: theme.spacing.xs,
+  },
+  missingItem: {
+    ...theme.typography.caption,
+    color: theme.colors.textMain,
+  },
   switchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -355,5 +430,13 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     ...theme.typography.label,
     color: '#fff',
+  },
+  textButton: {
+    paddingVertical: theme.spacing.xs,
+    alignItems: 'center',
+  },
+  textButtonText: {
+    ...theme.typography.caption,
+    color: theme.colors.accent,
   },
 });

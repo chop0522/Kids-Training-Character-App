@@ -12,7 +12,13 @@ export type BackupManifest = {
     image: number;
     video: number;
   };
+  mediaFiles?: Array<{
+    path: string;
+    bytes: number;
+    type: 'image' | 'video';
+  }>;
   missingMediaCount: number;
+  missingMediaPaths?: string[];
   totalMediaBytes: number;
 };
 
@@ -44,6 +50,8 @@ export type BackupInspectResult = {
   manifest: BackupManifest;
   dataState: Partial<AppStoreState>;
   stats: BackupStats;
+  missingMediaPaths?: string[];
+  expectedMediaPaths?: string[];
 };
 
 export type BackupRestoreResult = {

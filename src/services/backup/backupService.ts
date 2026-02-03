@@ -78,6 +78,8 @@ export async function createBackupZip(input: {
   let totalMediaBytes = 0;
   let missingMediaCount = 0;
   const missingMediaUris: string[] = [];
+  const missingMediaPaths: string[] = [];
+  const mediaFiles: BackupManifest['mediaFiles'] = [];
 
   if (input.includeMedia) {
     for (const session of sessions) {
@@ -85,25 +87,35 @@ export async function createBackupZip(input: {
       const nextAttachments: MediaAttachment[] = [];
       for (const attachment of normalized) {
         try {
+          const extension = getMediaFileExtension(attachment);
+          const zipPath = makeMediaZipPath(attachment.id, extension);
+          let originalBytes = 0;
           if (attachment.uri?.startsWith('file://')) {
             const info = await FileSystem.getInfoAsync(attachment.uri, { size: true });
             if (!info.exists) {
               missingMediaCount += 1;
               missingMediaUris.push(attachment.uri);
+              missingMediaPaths.push(zipPath);
               continue;
             }
             if (typeof info.size === 'number') {
-              totalMediaBytes += info.size;
+              originalBytes = info.size;
               if (info.size >= 50 * 1024 * 1024) {
                 missingMediaCount += 1;
                 missingMediaUris.push(attachment.uri);
+                missingMediaPaths.push(zipPath);
                 continue;
               }
             }
           }
-          const extension = getMediaFileExtension(attachment);
-          const zipPath = makeMediaZipPath(attachment.id, extension);
           const bytes = await readUriAsUint8Array(attachment.uri);
+          const fileBytes = originalBytes > 0 ? originalBytes : bytes.byteLength;
+          if (fileBytes >= 50 * 1024 * 1024) {
+            missingMediaCount += 1;
+            missingMediaUris.push(attachment.uri);
+            missingMediaPaths.push(zipPath);
+            continue;
+          }
           filesMap[zipPath] = bytes;
           attachmentsCount += 1;
           if (attachment.type === 'video') {
@@ -111,6 +123,12 @@ export async function createBackupZip(input: {
           } else {
             imageCount += 1;
           }
+          totalMediaBytes += fileBytes;
+          mediaFiles?.push({
+            path: zipPath,
+            bytes: fileBytes,
+            type: attachment.type,
+          });
           nextAttachments.push({
             ...attachment,
             uri: zipPath,
@@ -119,6 +137,10 @@ export async function createBackupZip(input: {
           // Skip attachment if reading fails
           missingMediaCount += 1;
           if (attachment.uri) missingMediaUris.push(attachment.uri);
+          if (attachment.id) {
+            const extension = getMediaFileExtension(attachment);
+            missingMediaPaths.push(makeMediaZipPath(attachment.id, extension));
+          }
         }
       }
       session.mediaAttachments = nextAttachments;
@@ -140,7 +162,9 @@ export async function createBackupZip(input: {
     childrenCount: stateCopy.children?.length ?? 0,
     sessionsCount: stateCopy.sessions?.length ?? 0,
     mediaCount: { image: imageCount, video: videoCount },
+    mediaFiles: mediaFiles?.length ? mediaFiles : undefined,
     missingMediaCount,
+    missingMediaPaths: missingMediaPaths.length ? missingMediaPaths : undefined,
     totalMediaBytes,
   };
   filesMap['manifest.json'] = strToU8(JSON.stringify(manifest));
@@ -203,6 +227,7 @@ export async function inspectBackupZip(input: { uri?: string; data?: Uint8Array 
   let imageCount = 0;
   let videoCount = 0;
   const sessions = state.sessions ?? [];
+  const expectedMediaPaths = new Set<string>();
   for (const session of sessions) {
     const normalized = normalizeAttachments(session.mediaAttachments);
     for (const attachment of normalized) {
@@ -212,8 +237,14 @@ export async function inspectBackupZip(input: { uri?: string; data?: Uint8Array 
       } else {
         imageCount += 1;
       }
+      if (attachment.uri?.startsWith('media/')) {
+        expectedMediaPaths.add(attachment.uri);
+      }
     }
   }
+
+  const actualMediaPaths = Object.keys(entries).filter((path) => path.startsWith('media/'));
+  const missingMediaPaths = Array.from(expectedMediaPaths).filter((path) => !actualMediaPaths.includes(path));
 
   const stats = buildStatsSummary(state, {
     attachmentsCount,
@@ -222,7 +253,13 @@ export async function inspectBackupZip(input: { uri?: string; data?: Uint8Array 
     totalMediaBytes: manifest.totalMediaBytes ?? 0,
   });
 
-  return { manifest, dataState: state, stats: { ...stats, missingMediaCount: manifest.missingMediaCount ?? 0 } };
+  return {
+    manifest,
+    dataState: state,
+    stats: { ...stats, missingMediaCount: missingMediaPaths.length },
+    missingMediaPaths,
+    expectedMediaPaths: Array.from(expectedMediaPaths),
+  };
 }
 
 export async function restoreBackupZip(input: {

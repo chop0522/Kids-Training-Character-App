@@ -20,6 +20,7 @@ import { RecordScreen } from './src/screens/RecordScreen';
 import { RecordSearchScreen } from './src/screens/RecordSearchScreen';
 import { BuddyEncyclopediaScreen } from './src/screens/BuddyEncyclopediaScreen';
 import { AppInfoScreen } from './src/screens/AppInfoScreen';
+import { LegalDocumentScreen } from './src/screens/LegalDocumentScreen';
 import { canEvolveBuddy } from './src/characterEvolutionConfig';
 import {
   BuddyStackParamList,
@@ -93,6 +94,7 @@ function SettingsStackNavigator() {
       <SettingsStack.Screen name="FamilySharing" component={FamilySharingScreen} />
       <SettingsStack.Screen name="SkinGallery" component={SkinGalleryScreen} />
       <SettingsStack.Screen name="AppInfo" component={AppInfoScreen} />
+      <SettingsStack.Screen name="LegalDocument" component={LegalDocumentScreen} />
     </SettingsStack.Navigator>
   );
 }

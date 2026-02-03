@@ -40,6 +40,7 @@ export type SettingsStackParamList = {
   FamilySharing: undefined;
   SkinGallery: undefined;
   AppInfo: undefined;
+  LegalDocument: { type: 'privacy' | 'terms' | 'support' };
 };
 
 export type RootStackParamList = {
