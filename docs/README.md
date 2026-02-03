@@ -14,7 +14,7 @@
 {
   "expo": {
     "extra": {
-      "publicWebBaseUrl": "https://YOUR_GITHUB_NAME.github.io/YOUR_REPO_NAME"
+      "publicWebBaseUrl": "https://<github-username>.github.io/<repo>"
     }
   }
 }

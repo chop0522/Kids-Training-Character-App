@@ -7,7 +7,7 @@ import { SettingsStackParamList } from '../navigation/types';
 import { theme } from '../theme';
 import { useParentalGate } from '../hooks/useParentalGate';
 import { buildPublicWebUrl, getPublicWebBaseUrl, PUBLIC_WEB_PATHS } from '../config/publicWeb';
-import { CONTACT_EMAIL } from '../config/legal';
+import { SUPPORT_EMAIL } from '../config/legalLinks';
 
 type Props = NativeStackScreenProps<SettingsStackParamList, 'AppInfo'>;
 
@@ -30,6 +30,19 @@ export function AppInfoScreen({ navigation }: Props) {
     await WebBrowser.openBrowserAsync(url);
   };
 
+  const openMail = async () => {
+    const ok = await requestParentalGate();
+    if (!ok) return;
+    const mailto = `mailto:${SUPPORT_EMAIL}`;
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined') {
+        window.open(mailto);
+      }
+      return;
+    }
+    await WebBrowser.openBrowserAsync(mailto);
+  };
+
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -47,7 +60,7 @@ export function AppInfoScreen({ navigation }: Props) {
           <Text style={styles.label}>バージョン</Text>
           <Text style={styles.value}>{appVersion}</Text>
           <Text style={styles.label}>お問い合わせ</Text>
-          <Text style={styles.value}>{CONTACT_EMAIL}</Text>
+          <Text style={styles.value}>{SUPPORT_EMAIL}</Text>
         </View>
 
         <View style={styles.card}>
@@ -60,6 +73,9 @@ export function AppInfoScreen({ navigation }: Props) {
           </Pressable>
           <Pressable style={styles.linkButton} onPress={() => navigation.navigate('LegalDocument', { type: 'support' })}>
             <Text style={styles.linkButtonText}>サポート/お問い合わせ</Text>
+          </Pressable>
+          <Pressable style={styles.linkButton} onPress={openMail}>
+            <Text style={styles.linkButtonText}>メールで問い合わせる</Text>
           </Pressable>
         </View>
 
