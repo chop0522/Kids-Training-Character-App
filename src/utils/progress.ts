@@ -1,4 +1,6 @@
 import { EffortLevel, TrainingSession } from '../types';
+import { fromDateKey, toDateKey } from './dateKey';
+import { isCompletedSession } from './sessionUtils';
 
 export function calculateXp(durationMinutes: number, effortLevel: EffortLevel): number {
   const basePerMinute = 5;
@@ -41,7 +43,7 @@ export function computeStreaks(
   childId: string,
   today: Date = new Date()
 ) {
-  const childSessions = sessions.filter((s) => s.childId === childId);
+  const childSessions = sessions.filter((s) => s.childId === childId && isCompletedSession(s));
   const uniqueDays = Array.from(
     new Set(childSessions.map((s) => s.dateKey ?? toDateKey(new Date(s.date))))
   ).sort((a, b) => (a > b ? -1 : 1)); // newest first
@@ -57,7 +59,7 @@ export function computeStreaks(
       continue;
     }
 
-    const diff = daysBetween(startOfDay(new Date(dayKey)), expectedDate);
+    const diff = daysBetween(startOfDay(fromDateKey(dayKey)), expectedDate);
     if (diff > 1) {
       break; // gap found
     }
@@ -68,7 +70,7 @@ export function computeStreaks(
   let prevDate: Date | null = null;
 
   for (const dayKey of uniqueDays) {
-    const date = startOfDay(new Date(dayKey));
+    const date = startOfDay(fromDateKey(dayKey));
     if (prevDate && daysBetween(prevDate, date) === 1) {
       streak += 1;
     } else {
@@ -79,14 +81,6 @@ export function computeStreaks(
   }
 
   return { currentStreak, bestStreak, doneToday: uniqueDays.includes(todayKey) };
-}
-
-function toDateKey(date: Date) {
-  const local = startOfDay(date);
-  const y = local.getFullYear();
-  const m = String(local.getMonth() + 1).padStart(2, '0');
-  const d = String(local.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
 }
 
 function startOfDay(date: Date) {

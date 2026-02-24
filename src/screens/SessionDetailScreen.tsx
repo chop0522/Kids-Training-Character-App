@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, Modal, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useAppStore } from '../store/AppStoreContext';
 import { RecordStackParamList } from '../navigation/types';
@@ -8,8 +8,12 @@ import { MediaAttachment } from '../types';
 import { sortSessionsByDateAsc } from '../utils/sessionUtils';
 import { formatTag, parseTagsFromText, uniqueTags } from '../utils/tagUtils';
 import { MediaAttachmentsEditor } from '../components/MediaAttachmentsEditor';
+import { PrimaryButton } from '../components/PrimaryButton';
+import { EffortLevel } from '../xp';
 
 type Props = NativeStackScreenProps<RecordStackParamList, 'SessionDetail'>;
+
+const quickDurations = [10, 20, 30, 40];
 
 export function SessionDetailScreen({ route, navigation }: Props) {
   const { childId, sessionId } = route.params;
@@ -22,6 +26,7 @@ export function SessionDetailScreen({ route, navigation }: Props) {
     updateSessionNote,
     updateSessionTags,
     updateSessionAttachments,
+    completePlannedSession,
     deleteTrainingSession,
   } = useAppStore();
 
@@ -32,6 +37,10 @@ export function SessionDetailScreen({ route, navigation }: Props) {
   const [tagInput, setTagInput] = useState('');
   const [tagsDraft, setTagsDraft] = useState<string[]>(session?.tags ?? []);
   const [attachments, setAttachments] = useState<MediaAttachment[]>(session?.mediaAttachments ?? []);
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [completeDurationText, setCompleteDurationText] = useState('20');
+  const [completeEffortLevel, setCompleteEffortLevel] = useState<EffortLevel>(2);
+  const [completing, setCompleting] = useState(false);
 
   useEffect(() => {
     setNoteDraft(session?.note ?? '');
@@ -44,6 +53,14 @@ export function SessionDetailScreen({ route, navigation }: Props) {
   useEffect(() => {
     setAttachments(session?.mediaAttachments ?? []);
   }, [session?.mediaAttachments]);
+
+  useEffect(() => {
+    if (!session || session.status !== 'planned') return;
+    setCompleteDurationText(session.durationMinutes > 0 ? String(session.durationMinutes) : '20');
+    if (session.effortLevel >= 1 && session.effortLevel <= 3) {
+      setCompleteEffortLevel(session.effortLevel as EffortLevel);
+    }
+  }, [session]);
 
   if (!child || !session || !activity) {
     return (
@@ -58,6 +75,7 @@ export function SessionDetailScreen({ route, navigation }: Props) {
     );
   }
 
+  const isPlanned = session.status === 'planned';
   const sessionsForActivity = getSessionsForChild(childId).filter((s) => s.activityId === session.activityId);
   const sortedAsc = sortSessionsByDateAsc(sessionsForActivity);
   const idx = sortedAsc.findIndex((s) => s.id === session.id);
@@ -67,7 +85,7 @@ export function SessionDetailScreen({ route, navigation }: Props) {
   const streakInfo = streakByChildId[childId];
   const hasVideo = attachments.some((item) => item.type === 'video');
 
-  const effortStars = '★'.repeat(session.effortLevel);
+  const effortStars = session.effortLevel > 0 ? '★'.repeat(session.effortLevel) : '未入力';
 
   const handleAddTagsFromInput = () => {
     const parsed = parseTagsFromText(tagInput);
@@ -90,25 +108,49 @@ export function SessionDetailScreen({ route, navigation }: Props) {
   };
 
   const handleDeleteSession = () => {
-    Alert.alert(
-      '記録を削除',
-      'この記録を削除します。獲得したXP/コイン/進捗も取り消されます。よろしいですか？',
-      [
-        { text: 'キャンセル', style: 'cancel' },
-        {
-          text: '削除',
-          style: 'destructive',
-          onPress: () => {
-            const res = deleteTrainingSession(sessionId);
-            if (res.ok) {
-              navigation.goBack();
-            } else {
-              Alert.alert('削除できませんでした');
-            }
-          },
+    const title = isPlanned ? '予定を削除' : '記録を削除';
+    const message = isPlanned
+      ? 'この予定を削除します。よろしいですか？'
+      : 'この記録を削除します。獲得したXP/コイン/進捗も取り消されます。よろしいですか？';
+
+    Alert.alert(title, message, [
+      { text: 'キャンセル', style: 'cancel' },
+      {
+        text: '削除',
+        style: 'destructive',
+        onPress: () => {
+          const res = deleteTrainingSession(sessionId);
+          if (res.ok) {
+            navigation.goBack();
+          } else {
+            Alert.alert('削除できませんでした');
+          }
         },
-      ]
-    );
+      },
+    ]);
+  };
+
+  const handleCompletePlanned = () => {
+    const durationMinutes = Number(completeDurationText) || 0;
+    if (durationMinutes <= 0) {
+      Alert.alert('時間を入力してください', '1分以上を入力してください。');
+      return;
+    }
+    setCompleting(true);
+    const result = completePlannedSession(sessionId, {
+      durationMinutes,
+      effortLevel: completeEffortLevel,
+      note: noteDraft.trim(),
+      tags: tagsDraft,
+      mediaAttachments: attachments,
+    });
+    setCompleting(false);
+    if (!result) {
+      Alert.alert('確定できませんでした', '入力内容を確認してもう一度お試しください。');
+      return;
+    }
+    setShowCompleteModal(false);
+    Alert.alert('記録として確定しました', `XP +${result.buddyXpGained} / コイン進捗 +${result.skinCoinsGained}`);
   };
 
   return (
@@ -119,6 +161,11 @@ export function SessionDetailScreen({ route, navigation }: Props) {
             <Text style={styles.backIcon}>‹</Text>
           </Pressable>
           <Text style={styles.headerTitle}>{activity.name}</Text>
+          {isPlanned && (
+            <View style={styles.headerBadge}>
+              <Text style={styles.headerBadgeText}>予定</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.summaryCard}>
@@ -129,7 +176,7 @@ export function SessionDetailScreen({ route, navigation }: Props) {
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>時間</Text>
-            <Text style={styles.summaryValue}>{session.durationMinutes}分</Text>
+            <Text style={styles.summaryValue}>{isPlanned ? '未確定' : `${session.durationMinutes}分`}</Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>がんばり度</Text>
@@ -142,6 +189,14 @@ export function SessionDetailScreen({ route, navigation }: Props) {
             </Text>
           </View>
         </View>
+
+        {isPlanned && (
+          <View style={styles.planCard}>
+            <Text style={styles.planTitle}>予定</Text>
+            <Text style={styles.planText}>あとで写真・コメントを追加し、「記録として確定」ができます。</Text>
+            <PrimaryButton title="記録として確定" onPress={() => setShowCompleteModal(true)} />
+          </View>
+        )}
 
         <View style={styles.tagCard}>
           <Text style={styles.tagTitle}>タグ</Text>
@@ -184,7 +239,7 @@ export function SessionDetailScreen({ route, navigation }: Props) {
         </View>
 
         <View style={styles.noteCard}>
-          <Text style={styles.noteLabel}>今日のメモ</Text>
+          <Text style={styles.noteLabel}>メモ</Text>
           <TextInput
             style={styles.noteInput}
             multiline
@@ -196,67 +251,125 @@ export function SessionDetailScreen({ route, navigation }: Props) {
           />
         </View>
 
-        <View style={styles.compareNavCard}>
-          <View style={styles.compareButtonsRow}>
-            <Pressable
-              onPress={() =>
-                prevSession && navigation.push('SessionDetail', { childId, sessionId: prevSession.id })
-              }
-              disabled={!prevSession}
-              style={[
-                styles.navButton,
-                styles.navButtonLeft,
-                !prevSession && styles.navButtonDisabled,
-              ]}
-            >
-              <Text style={styles.navButtonText}>＜ 前の{activity.name}</Text>
-            </Pressable>
-            <Pressable
-              onPress={() =>
-                nextSession && navigation.push('SessionDetail', { childId, sessionId: nextSession.id })
-              }
-              disabled={!nextSession}
-              style={[
-                styles.navButton,
-                styles.navButtonRight,
-                !nextSession && styles.navButtonDisabled,
-              ]}
-            >
-              <Text style={styles.navButtonText}>次の{activity.name} ＞</Text>
-            </Pressable>
+        {!isPlanned && (
+          <View style={styles.compareNavCard}>
+            <View style={styles.compareButtonsRow}>
+              <Pressable
+                onPress={() =>
+                  prevSession && navigation.push('SessionDetail', { childId, sessionId: prevSession.id })
+                }
+                disabled={!prevSession}
+                style={[styles.navButton, styles.navButtonLeft, !prevSession && styles.navButtonDisabled]}
+              >
+                <Text style={styles.navButtonText}>＜ 前の{activity.name}</Text>
+              </Pressable>
+              <Pressable
+                onPress={() =>
+                  nextSession && navigation.push('SessionDetail', { childId, sessionId: nextSession.id })
+                }
+                disabled={!nextSession}
+                style={[styles.navButton, styles.navButtonRight, !nextSession && styles.navButtonDisabled]}
+              >
+                <Text style={styles.navButtonText}>次の{activity.name} ＞</Text>
+              </Pressable>
+            </View>
+            {prevSession ? (
+              <Pressable
+                onPress={() =>
+                  navigation.navigate('SessionCompare', {
+                    childId,
+                    activityId: session.activityId,
+                    beforeSessionId: prevSession.id,
+                    afterSessionId: session.id,
+                  })
+                }
+                style={styles.comparePrimaryButton}
+              >
+                <Text style={styles.comparePrimaryButtonText}>前回と比べる</Text>
+              </Pressable>
+            ) : (
+              <Text style={styles.compareHintText}>前回の記録がまだありません</Text>
+            )}
           </View>
-          {prevSession ? (
-            <Pressable
-              onPress={() =>
-                navigation.navigate('SessionCompare', {
-                  childId,
-                  activityId: session.activityId,
-                  beforeSessionId: prevSession.id,
-                  afterSessionId: session.id,
-                })
-              }
-              style={styles.comparePrimaryButton}
-            >
-              <Text style={styles.comparePrimaryButtonText}>前回と比べる</Text>
-            </Pressable>
-          ) : (
-            <Text style={styles.compareHintText}>前回の記録がまだありません</Text>
-          )}
-        </View>
+        )}
 
         <Pressable style={styles.deleteButton} onPress={handleDeleteSession}>
-          <Text style={styles.deleteButtonText}>この記録を削除</Text>
+          <Text style={styles.deleteButtonText}>{isPlanned ? '予定を削除' : 'この記録を削除'}</Text>
         </Pressable>
 
-        <View style={styles.statusCard}>
-          <Text style={styles.statusTitle}>もらったXP/コイン</Text>
-          <Text style={styles.statusText}>
-            XP +{session.xpGained} / コイン +{session.coinsGained}
-          </Text>
-          {streakInfo && <Text style={styles.statusText}>ストリーク：{streakInfo.current}日</Text>}
-          {hasVideo && <Text style={styles.statusText}>動画も追加されたよ！</Text>}
-        </View>
+        {!isPlanned && (
+          <View style={styles.statusCard}>
+            <Text style={styles.statusTitle}>もらったXP/コイン</Text>
+            <Text style={styles.statusText}>
+              XP +{session.xpGained} / コイン +{session.coinsGained}
+            </Text>
+            {streakInfo && <Text style={styles.statusText}>ストリーク：{streakInfo.current}日</Text>}
+            {hasVideo && <Text style={styles.statusText}>動画も追加されたよ！</Text>}
+          </View>
+        )}
       </ScrollView>
+
+      <Modal transparent visible={showCompleteModal} animationType="fade" onRequestClose={() => setShowCompleteModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>記録として確定</Text>
+            <Text style={styles.modalText}>時間・がんばり度を入力して確定します。</Text>
+
+            <Text style={styles.modalLabel}>時間（分）</Text>
+            <TextInput
+              style={styles.modalInput}
+              keyboardType="numeric"
+              value={completeDurationText}
+              onChangeText={setCompleteDurationText}
+              placeholder="20"
+              placeholderTextColor={theme.colors.textDisabled}
+            />
+
+            <View style={styles.quickButtonsRow}>
+              {quickDurations.map((duration) => {
+                const selected = Number(completeDurationText) === duration;
+                return (
+                  <Pressable
+                    key={duration}
+                    style={[styles.quickButton, selected && styles.quickButtonSelected]}
+                    onPress={() => setCompleteDurationText(String(duration))}
+                  >
+                    <Text style={[styles.quickButtonText, selected && styles.quickButtonTextSelected]}>{duration}分</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Text style={[styles.modalLabel, styles.modalLabelSpacing]}>がんばり度</Text>
+            <View style={styles.optionRow}>
+              {[1, 2, 3].map((level) => {
+                const selected = completeEffortLevel === level;
+                return (
+                  <Pressable
+                    key={level}
+                    onPress={() => setCompleteEffortLevel(level as EffortLevel)}
+                    style={[styles.chip, selected ? styles.chipSelected : styles.chipUnselected]}
+                  >
+                    <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{level}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalSecondaryButton} onPress={() => setShowCompleteModal(false)}>
+                <Text style={styles.modalSecondaryText}>キャンセル</Text>
+              </Pressable>
+              <PrimaryButton
+                title={completing ? '確定中...' : '確定する'}
+                onPress={handleCompletePlanned}
+                disabled={completing}
+                style={styles.modalPrimaryButton}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -309,6 +422,20 @@ const styles = StyleSheet.create({
     ...theme.typography.heading1,
     color: theme.colors.textMain,
   },
+  headerBadge: {
+    marginLeft: theme.spacing.sm,
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 2,
+    backgroundColor: theme.colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+  },
+  headerBadgeText: {
+    ...theme.typography.caption,
+    fontSize: 10,
+    color: theme.colors.textSub,
+  },
   summaryCard: {
     backgroundColor: theme.colors.surface,
     borderRadius: theme.radius.md,
@@ -333,6 +460,23 @@ const styles = StyleSheet.create({
   summaryValue: {
     ...theme.typography.body,
     color: theme.colors.textMain,
+  },
+  planCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    ...theme.shadows.card,
+  },
+  planTitle: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+    marginBottom: theme.spacing.xs,
+  },
+  planText: {
+    ...theme.typography.body,
+    color: theme.colors.textSub,
+    marginBottom: theme.spacing.sm,
   },
   tagCard: {
     backgroundColor: theme.colors.surface,
@@ -413,93 +557,6 @@ const styles = StyleSheet.create({
     ...theme.typography.heading2,
     color: theme.colors.textMain,
     marginBottom: theme.spacing.sm,
-  },
-  mainMediaContainer: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.radius.md,
-    padding: theme.spacing.md,
-    marginBottom: theme.spacing.md,
-    ...theme.shadows.card,
-    gap: theme.spacing.xs,
-  },
-  mainMediaPlaceholder: {
-    height: 200,
-    borderRadius: theme.radius.md,
-    backgroundColor: theme.colors.surfaceAlt,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mainMediaPlaceholderText: {
-    ...theme.typography.body,
-    color: theme.colors.textSub,
-  },
-  mainImage: {
-    width: '100%',
-    height: 220,
-    borderRadius: theme.radius.md,
-    marginBottom: theme.spacing.sm,
-  },
-  mainVideo: {
-    width: '100%',
-    height: 220,
-    borderRadius: theme.radius.md,
-    marginBottom: theme.spacing.sm,
-    backgroundColor: theme.colors.surfaceAlt,
-  },
-  videoIcon: {
-    fontSize: 24,
-    color: theme.colors.textMain,
-  },
-  mediaLimitText: {
-    ...theme.typography.caption,
-    color: theme.colors.textSub,
-  },
-  thumbnailStrip: {
-    marginBottom: theme.spacing.md,
-  },
-  thumbnailScroll: {
-    flexDirection: 'row',
-  },
-  thumbnailItem: {
-    width: 72,
-    height: 72,
-    borderRadius: theme.radius.md,
-    marginRight: theme.spacing.sm,
-    overflow: 'hidden',
-    backgroundColor: theme.colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-    borderWidth: 1,
-    borderColor: theme.colors.borderSoft,
-  },
-  thumbnailItemSelected: {
-    borderColor: theme.colors.accent,
-  },
-  thumbnailImage: {
-    width: '100%',
-    height: '100%',
-  },
-  videoThumb: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  removeBadge: {
-    position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 20,
-    height: 20,
-    borderRadius: theme.radius.full,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  removeBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
   },
   noteCard: {
     backgroundColor: theme.colors.surface,
@@ -599,5 +656,117 @@ const styles = StyleSheet.create({
   deleteButtonText: {
     ...theme.typography.label,
     color: '#fff',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: theme.spacing.lg,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+  },
+  modalTitle: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+    marginBottom: theme.spacing.xs,
+  },
+  modalText: {
+    ...theme.typography.body,
+    color: theme.colors.textSub,
+    marginBottom: theme.spacing.sm,
+  },
+  modalLabel: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+    marginBottom: theme.spacing.xs,
+  },
+  modalLabelSpacing: {
+    marginTop: theme.spacing.sm,
+  },
+  modalInput: {
+    ...theme.typography.body,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    backgroundColor: theme.colors.surface,
+    color: theme.colors.textMain,
+  },
+  quickButtonsRow: {
+    flexDirection: 'row',
+    marginTop: theme.spacing.sm,
+  },
+  quickButton: {
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+    marginRight: theme.spacing.sm,
+  },
+  quickButtonSelected: {
+    backgroundColor: theme.colors.primary,
+    borderColor: theme.colors.primary,
+  },
+  quickButtonText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  quickButtonTextSelected: {
+    color: '#FFFFFF',
+  },
+  optionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.sm,
+  },
+  chip: {
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+  },
+  chipSelected: {
+    backgroundColor: theme.colors.primary,
+    borderColor: theme.colors.primary,
+  },
+  chipUnselected: {
+    backgroundColor: theme.colors.surface,
+    borderColor: theme.colors.borderSoft,
+  },
+  chipText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  chipTextSelected: {
+    color: '#FFFFFF',
+  },
+  modalActions: {
+    marginTop: theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: theme.spacing.sm,
+  },
+  modalSecondaryButton: {
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+  },
+  modalSecondaryText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  modalPrimaryButton: {
+    minWidth: 120,
   },
 });

@@ -40,6 +40,8 @@ export type Activity = {
 };
 
 export type EffortLevel = 1 | 2 | 3;
+export type SessionEffortLevel = 0 | EffortLevel;
+export type SessionStatus = 'completed' | 'planned';
 
 export type MediaAttachment = {
   id: string;
@@ -61,7 +63,7 @@ export type TrainingSession = {
   date: string; // ISO string
   dateKey: string; // YYYY-MM-DD (local date)
   durationMinutes: number;
-  effortLevel: EffortLevel;
+  effortLevel: SessionEffortLevel;
   xpGained: number;
   coinsGained: number;
   mediaAttachments?: MediaAttachment[];
@@ -72,6 +74,7 @@ export type TrainingSession = {
   treasureProgressDelta?: number;
   buddyKey?: string;
   tags: string[];
+  status?: SessionStatus;
   note?: string;
 };
 

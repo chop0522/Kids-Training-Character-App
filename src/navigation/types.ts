@@ -1,12 +1,12 @@
 export type HomeStackParamList = {
   Home: { childId?: string } | undefined;
-  TrainingLog: { childId: string };
+  TrainingLog: { childId: string; dateKey?: string; status?: 'completed' | 'planned' };
   TreasureProgress: { childId?: string } | undefined;
 };
 
 export type RecordStackParamList = {
   Record: { childId?: string } | undefined;
-  TrainingLog: { childId: string };
+  TrainingLog: { childId: string; dateKey?: string; status?: 'completed' | 'planned' };
   SessionDetail: { childId: string; sessionId: string };
   ActivityTimeline: { childId: string; activityId: string };
   SessionCompare: {

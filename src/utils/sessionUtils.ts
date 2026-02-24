@@ -1,10 +1,8 @@
 import { Media, TrainingSession } from '../types';
+import { toDateKey } from './dateKey';
 
 export function getLocalDateKey(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return toDateKey(date);
 }
 
 export function getLocalDateKeyFromIso(iso: string): string {
@@ -19,14 +17,22 @@ export function getSessionDateKey(session: TrainingSession): string {
   return session.dateKey ?? getLocalDateKeyFromIso(session.date);
 }
 
+export function isPlannedSession(session: TrainingSession): boolean {
+  return session.status === 'planned';
+}
+
+export function isCompletedSession(session: TrainingSession): boolean {
+  return !isPlannedSession(session);
+}
+
 export function formatDateYmd(iso: string): string {
   const ymd = getLocalDateKeyFromIso(iso);
   const [y, m, d] = ymd.split('-');
   return `${y}/${m}/${d}`;
 }
 
-export function effortStars(effortLevel: 1 | 2 | 3): string {
-  return '★'.repeat(effortLevel);
+export function effortStars(effortLevel: number): string {
+  return effortLevel > 0 ? '★'.repeat(effortLevel) : '未入力';
 }
 
 export function pickDefaultMainMedia(media: Media[]): Media | undefined {

@@ -10,7 +10,8 @@ import {
 import { loadAppState, saveAppState } from '../storage/appStorage';
 import { calculateCoins, calculateXp, computeStreaks, getLevelFromXp } from '../utils/progress';
 import { createInitialTreasureState } from '../treasureConfig';
-import { getLocalDateKey, getLocalDateKeyFromIso } from '../utils/sessionUtils';
+import { fromDateKey } from '../utils/dateKey';
+import { getLocalDateKey } from '../utils/sessionUtils';
 import { normalizeTags } from '../utils/tagUtils';
 
 type AddTrainingPayload = {
@@ -48,11 +49,22 @@ const emptyCategoryTrainingCount = {
 };
 
 function normalizeSessions(sessions: TrainingSession[]): TrainingSession[] {
-  return sessions.map((session) => ({
-    ...session,
-    dateKey: session.dateKey ?? getLocalDateKeyFromIso(session.date),
-    tags: normalizeTags(Array.isArray(session.tags) ? session.tags : []),
-  }));
+  return sessions.map((session) => {
+    const dateKey = session.dateKey ?? getLocalDateKey(new Date(session.date));
+    const status = session.status === 'planned' ? 'planned' : 'completed';
+    return {
+      ...session,
+      dateKey,
+      date: fromDateKey(dateKey).toISOString(),
+      tags: normalizeTags(Array.isArray(session.tags) ? session.tags : []),
+      note: typeof session.note === 'string' ? session.note : '',
+      status,
+      durationMinutes: status === 'planned' ? 0 : session.durationMinutes,
+      effortLevel: status === 'planned' ? 0 : session.effortLevel,
+      xpGained: status === 'planned' ? 0 : session.xpGained,
+      coinsGained: status === 'planned' ? 0 : session.coinsGained,
+    };
+  });
 }
 
 function buildStarterNodes(childId: string) {
@@ -198,18 +210,20 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     const totalCoinGain = sessionCoins + mapRewardCoins;
 
     const sessionTags = normalizeTags(tags);
+    const dateKey = getLocalDateKey(new Date());
     const session: TrainingSession = {
       id: nanoid(10),
       childId,
       activityId,
-      date: new Date().toISOString(),
-      dateKey: getLocalDateKey(new Date()),
+      date: fromDateKey(dateKey).toISOString(),
+      dateKey,
       durationMinutes,
       effortLevel,
       xpGained: totalXpGain,
       coinsGained: totalCoinGain,
       tags: sessionTags,
-      note,
+      note: note ?? '',
+      status: 'completed',
     };
 
     const updatedSessions = [session, ...state.sessions];

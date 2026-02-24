@@ -19,7 +19,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "写真や動画を撮影するためにカメラを使用します。",
         "NSPhotoLibraryUsageDescription": "写真や動画を追加するためにフォトライブラリを使用します。",
-        "NSMicrophoneUsageDescription": "動画撮影時の音声録音のためにマイクを使用します。"
+        "NSMicrophoneUsageDescription": "動画撮影時の音声録音のためにマイクを使用します。",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -34,7 +35,10 @@
       "favicon": "./assets/favicon.png"
     },
     "extra": {
-      "publicWebBaseUrl": "https://chop0522.github.io/Kids-Training-Character-App/"
+      "publicWebBaseUrl": "https://chop0522.github.io/Kids-Training-Character-App/",
+      "eas": {
+        "projectId": "de005f31-196d-438f-9132-e833a92777c8"
+      }
     },
     "plugins": [
       "expo-web-browser"

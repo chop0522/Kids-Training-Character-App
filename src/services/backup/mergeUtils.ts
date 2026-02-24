@@ -1,6 +1,7 @@
 import type { AppStoreState } from '../../store/AppStoreContext';
 import type { OwnedSkin, TrainingSession } from '../../types';
 import { computeStreaks } from '../../utils/progress';
+import { getSessionDateKey, isCompletedSession } from '../../utils/sessionUtils';
 import { sanitizeState } from './backupUtils';
 
 function mergeById<T extends { id: string }>(base: T[], incoming: T[]): T[] {
@@ -60,6 +61,7 @@ export function mergeAppStates(current: AppStoreState, incoming: Partial<AppStor
   let treasureProgress = current.treasure?.progress ?? 0;
 
   addedSessions.forEach((session) => {
+    if (!isCompletedSession(session)) return;
     const category = session.skinCategory;
     if (category) {
       nextCategoryTrainingCount[category] = (nextCategoryTrainingCount[category] ?? 0) + 1;
@@ -82,7 +84,17 @@ export function mergeAppStates(current: AppStoreState, incoming: Partial<AppStor
 
   const nextStreakByChildId: AppStoreState['streakByChildId'] = { ...current.streakByChildId };
   nextChildren.forEach((child) => {
-    nextStreakByChildId[child.id] = computeStreaks(nextSessions, child.id);
+    const streak = computeStreaks(nextSessions, child.id);
+    const completedDates = nextSessions
+      .filter((session) => session.childId === child.id && isCompletedSession(session))
+      .map((session) => getSessionDateKey(session))
+      .sort();
+    const lastSessionDate = completedDates[completedDates.length - 1];
+    nextStreakByChildId[child.id] = {
+      current: streak.currentStreak,
+      best: streak.bestStreak,
+      lastSessionDate,
+    };
   });
 
   return sanitizeState({

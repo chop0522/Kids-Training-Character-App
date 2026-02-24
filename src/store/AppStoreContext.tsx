@@ -27,6 +27,7 @@ import {
   TrainingResult,
   TrainingSession,
   MediaAttachment,
+  SessionStatus,
 } from '../types';
 import { clearPersistedState, loadPersistedState, savePersistedState } from '../storage/appStateStorage';
 import { applyXpToLevel, calculateCoins, calculateXp, EffortLevel, getMoodBonus } from '../xp';
@@ -45,7 +46,8 @@ import { deleteFromAppStorageIfOwned } from '../media/localMediaStorage';
 import { warnMissingSkinAssets } from '../assets/skinAssetsValidation';
 import { createInitialTreasureState, getTreasureKind, getTreasureTargetForIndex } from '../treasureConfig';
 import { getCategoryLevelInfoFromCount } from '../categoryLevel';
-import { getLocalDateKey, getLocalDateKeyFromIso, getSessionDateKey } from '../utils/sessionUtils';
+import { fromDateKey, toDateKey } from '../utils/dateKey';
+import { getLocalDateKey, getSessionDateKey, isCompletedSession } from '../utils/sessionUtils';
 import { normalizeTags } from '../utils/tagUtils';
 import { theme } from '../theme';
 
@@ -76,13 +78,25 @@ export type AppStore = {
   logTrainingSession: (input: {
     childId: string;
     activityId: string;
-    durationMinutes: number;
-    effortLevel: EffortLevel;
+    durationMinutes?: number;
+    effortLevel?: EffortLevel;
+    status?: SessionStatus;
+    dateKey?: string;
     note?: string;
     tags?: string[];
     mediaAttachments?: MediaAttachment[];
     sessionId?: string;
   }) => TrainingResult | null;
+  completePlannedSession: (
+    sessionId: string,
+    input: {
+      durationMinutes: number;
+      effortLevel: EffortLevel;
+      note?: string;
+      tags?: string[];
+      mediaAttachments?: MediaAttachment[];
+    }
+  ) => TrainingResult | null;
   updateSessionNote: (sessionId: string, note: string) => void;
   updateSessionTags: (sessionId: string, tags: string[]) => void;
   updateSessionAttachments: (sessionId: string, attachments: MediaAttachment[]) => void;
@@ -190,6 +204,45 @@ const TREASURE_REWARD_COINS_LARGE: [number, number] = [150, 250];
 const TREASURE_REWARD_TICKETS_MEDIUM_CHANCE = 0.5;
 const TREASURE_REWARD_TICKETS_MEDIUM_AMOUNT = 1;
 const TREASURE_REWARD_TICKETS_LARGE_AMOUNT = 1;
+const DEFAULT_SESSION_STATUS: SessionStatus = 'completed';
+
+type LogTrainingInput = {
+  childId: string;
+  activityId: string;
+  durationMinutes?: number;
+  effortLevel?: EffortLevel;
+  status?: SessionStatus;
+  dateKey?: string;
+  note?: string;
+  tags?: string[];
+  mediaAttachments?: MediaAttachment[];
+  sessionId?: string;
+};
+
+type CompletePlannedInput = {
+  durationMinutes: number;
+  effortLevel: EffortLevel;
+  note?: string;
+  tags?: string[];
+  mediaAttachments?: MediaAttachment[];
+};
+
+type ApplyCompletedSessionInput = {
+  childId: string;
+  activityId: string;
+  durationMinutes: number;
+  effortLevel: EffortLevel;
+  note?: string;
+  tags?: string[];
+  mediaAttachments?: MediaAttachment[];
+  sessionId: string;
+  dateKey: string;
+};
+
+type ApplyCompletedSessionResult = {
+  nextState: StoreState;
+  trainingResult: TrainingResult;
+};
 
 export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<StoreState | null>(null);
@@ -325,205 +378,87 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     return newChild;
   };
 
-  const logTrainingSession = (input: {
-    childId: string;
-    activityId: string;
-    durationMinutes: number;
-    effortLevel: EffortLevel;
-    note?: string;
-    tags?: string[];
-    mediaAttachments?: MediaAttachment[];
-    sessionId?: string;
-  }): TrainingResult | null => {
+  const logTrainingSession = (input: LogTrainingInput): TrainingResult | null => {
     let result: TrainingResult | null = null;
     setState((prev) => {
       if (!prev) return prev;
-      const { childId, activityId, durationMinutes, effortLevel, note, sessionId, mediaAttachments } = input;
-      const now = new Date();
-      const dateTimeIso = now.toISOString();
-      const todayDate = getLocalDateKey(now);
+      const status: SessionStatus = input.status === 'planned' ? 'planned' : DEFAULT_SESSION_STATUS;
+      const dateKey = normalizeDateKey(input.dateKey);
+      const sessionId = input.sessionId ?? String(Date.now());
 
-      const activeBuddyKey = getActiveBuddyKey(prev, childId);
-      const buddyBefore = getBuddyProgress(prev, childId, activeBuddyKey);
-      const moodBefore = buddyBefore.mood ?? 50;
-      const baseXp = calculateXp(durationMinutes, effortLevel);
-      const baseCoins = calculateCoins(durationMinutes, effortLevel);
-      const moodBonus = getMoodBonus(moodBefore);
-      const xpGained = Math.floor(baseXp * moodBonus.xpMultiplier);
-      const coinsGained = baseCoins + moodBonus.extraCoins;
-      const activity = prev.activities.find((a) => a.id === activityId);
-      const skinCategory = getSkinCategoryForActivity(activity);
-      const prevWallet = normalizeWallet(prev.wallet);
-      const prevProgress = normalizeProgress(prev.progress);
-      const prevCategoryTrainingCount = normalizeCategoryTrainingCount(prev.categoryTrainingCount);
-      const walletCategory = prevWallet[skinCategory];
-      const nextTicketProgress = walletCategory.ticketProgress + 1;
-      const ticketsGained = Math.floor(nextTicketProgress / SKIN_TICKET_PROGRESS_PER_TICKET);
-      const updatedWalletCategory = {
-        ...walletCategory,
-        coins: walletCategory.coins + SKIN_COINS_PER_ACTIVITY,
-        tickets: walletCategory.tickets + ticketsGained,
-        ticketProgress: nextTicketProgress % SKIN_TICKET_PROGRESS_PER_TICKET,
-      };
-      const walletCoinsDelta = updatedWalletCategory.coins - walletCategory.coins;
-      const walletTicketsDelta = updatedWalletCategory.tickets - walletCategory.tickets;
-      const walletTicketProgressDelta = updatedWalletCategory.ticketProgress - walletCategory.ticketProgress;
-      const wallet = { ...prevWallet, [skinCategory]: updatedWalletCategory };
-      const progress = {
-        ...prevProgress,
-        [skinCategory]: {
-          completedCount: (prevProgress[skinCategory]?.completedCount ?? 0) + 1,
-        },
-      };
-      const categoryTrainingCount = {
-        ...prevCategoryTrainingCount,
-        [skinCategory]: (prevCategoryTrainingCount[skinCategory] ?? 0) + 1,
-      };
-      const treasure = normalizeTreasure(prev.treasure);
-      const updatedTreasure: TreasureState = {
-        ...treasure,
-        progress: treasure.progress + 1,
-      };
-      const buddyBeforeLevel = buddyBefore.level;
-      const buddyUpdated = applyXpToLevel(buddyBefore.level, buddyBefore.xp, xpGained);
-      const updatedBuddyProgress: BuddyProgress = {
-        ...buddyBefore,
-        level: buddyUpdated.level,
-        xp: buddyUpdated.xp,
-        mood: Math.min(100, buddyBefore.mood + 10),
-      };
-      const buddyLevelUps = Math.max(0, buddyUpdated.level - buddyBeforeLevel);
-      const prevBuddyProgressByChildId = prev.buddyProgressByChildId ?? {};
-      const prevChildBuddyProgress = prevBuddyProgressByChildId[childId] ?? {};
-      const buddyProgressByChildId = {
-        ...prevBuddyProgressByChildId,
-        [childId]: {
-          ...prevChildBuddyProgress,
-          [activeBuddyKey]: updatedBuddyProgress,
-        },
-      };
-      const activeBuddyKeyByChildId = {
-        ...prev.activeBuddyKeyByChildId,
-        [childId]: activeBuddyKey,
-      };
-      const discoveredSet = new Set(prev.discoveredFormIdsByChildId?.[childId] ?? []);
-      const currentForm = getBuddyForm(activeBuddyKey, updatedBuddyProgress.stageIndex);
-      discoveredSet.add(currentForm.formId);
-      const discoveredFormIdsByChildId = {
-        ...prev.discoveredFormIdsByChildId,
-        [childId]: Array.from(discoveredSet),
-      };
+      if (status === 'planned') {
+        const plannedSession: TrainingSession = {
+          id: sessionId,
+          childId: input.childId,
+          activityId: input.activityId,
+          dateKey,
+          date: toSessionIsoFromDateKey(dateKey),
+          durationMinutes: 0,
+          effortLevel: 0,
+          xpGained: 0,
+          coinsGained: 0,
+          mediaAttachments: normalizeAttachments(input.mediaAttachments),
+          tags: normalizeTags(input.tags),
+          status: 'planned',
+          note: normalizeSessionNote(input.note),
+        };
+        const hasExisting = prev.sessions.some((session) => session.id === sessionId);
+        const sessions = hasExisting
+          ? prev.sessions.map((session) => (session.id === sessionId ? plannedSession : session))
+          : [...prev.sessions, plannedSession];
+        return { ...prev, sessions };
+      }
 
-      const sessionTags = normalizeTags(input.tags);
-      const newSession: TrainingSession = {
-        id: sessionId ?? String(Date.now()),
-        childId,
-        activityId,
-        date: dateTimeIso,
-        dateKey: todayDate,
+      const durationMinutes = normalizeDurationMinutes(input.durationMinutes);
+      const effortLevel = normalizeCompletedEffortLevel(input.effortLevel);
+      if (durationMinutes <= 0 || !effortLevel) return prev;
+
+      const applied = applyCompletedSession(prev, {
+        childId: input.childId,
+        activityId: input.activityId,
         durationMinutes,
         effortLevel,
-        xpGained,
-        coinsGained,
-        mediaAttachments: normalizeAttachments(mediaAttachments),
-        skinCategory,
-        walletCoinsDelta,
-        walletTicketsDelta,
-        walletTicketProgressDelta,
-        treasureProgressDelta: 1,
-        buddyKey: activeBuddyKey,
-        tags: sessionTags,
-        note,
-      };
-
-      const sessions = [...prev.sessions, newSession];
-
-      const prevStreak = prev.streakByChildId[childId] ?? { current: 0, best: 0, lastSessionDate: undefined };
-      let newCurrent = 1;
-      if (prevStreak.lastSessionDate === todayDate) {
-        newCurrent = prevStreak.current;
-      } else if (prevStreak.lastSessionDate) {
-        const diffDays = dayDiff(prevStreak.lastSessionDate, todayDate);
-        newCurrent = diffDays === 1 ? prevStreak.current + 1 : 1;
-      }
-      const newBest = Math.max(prevStreak.best, newCurrent);
-
-      const streakByChildId: Record<string, StreakInfo> = {
-        ...prev.streakByChildId,
-        [childId]: {
-          current: newCurrent,
-          best: newBest,
-          lastSessionDate: todayDate,
-        },
-      };
-
-      const updatedChildren = prev.children.map((child) => {
-        if (child.id !== childId) return child;
-        return {
-          ...child,
-          level: updatedBuddyProgress.level,
-          xp: updatedBuddyProgress.xp,
-          coins: child.coins + coinsGained,
-          totalMinutes: child.totalMinutes + durationMinutes,
-          currentStreak: newCurrent,
-          bestStreak: Math.max(newBest, child.bestStreak),
-        };
+        note: input.note,
+        tags: input.tags,
+        mediaAttachments: input.mediaAttachments,
+        sessionId,
+        dateKey,
       });
+      if (!applied) return prev;
+      result = applied.trainingResult;
+      return applied.nextState;
+    });
+    return result;
+  };
 
-      let nextState: StoreState = {
-        ...prev,
-        children: updatedChildren,
-        sessions,
-        streakByChildId,
-        wallet,
-        progress,
-        categoryTrainingCount,
-        treasure: updatedTreasure,
-        lastActivityCategory: skinCategory,
-        activeBuddyKeyByChildId,
-        buddyProgressByChildId,
-        discoveredFormIdsByChildId,
-      };
+  const completePlannedSession = (
+    sessionId: string,
+    input: CompletePlannedInput
+  ): TrainingResult | null => {
+    let result: TrainingResult | null = null;
+    setState((prev) => {
+      if (!prev) return prev;
+      const target = prev.sessions.find((session) => session.id === sessionId);
+      if (!target || target.status !== 'planned') return prev;
 
-      nextState = ensureMapForChild(nextState, childId);
+      const durationMinutes = normalizeDurationMinutes(input.durationMinutes);
+      const effortLevel = normalizeCompletedEffortLevel(input.effortLevel);
+      if (durationMinutes <= 0 || !effortLevel) return prev;
 
-      const { state: withBrain, character } = ensureBrainCharacterForChild(nextState, childId);
-
-      const updatedCharacter: BrainCharacter = {
-        ...character,
-        level: updatedBuddyProgress.level,
-        xp: updatedBuddyProgress.xp,
-        mood: updatedBuddyProgress.mood,
-        skinId: activeBuddyKey,
-      };
-
-      nextState = {
-        ...withBrain,
-        brainCharacters: withBrain.brainCharacters.map((brain) =>
-          brain.id === updatedCharacter.id ? updatedCharacter : brain
-        ),
-      };
-
-      const mapResult = applyTrainingToMap(nextState, childId, xpGained, coinsGained);
-      nextState = mapResult.state;
-
-      const achievementResult = checkAndUnlockAchievementsForChild(nextState, childId);
-      nextState = achievementResult.state;
-
-      result = {
-        sessionId: newSession.id,
-        buddyLevelUps,
-        buddyXpGained: xpGained,
-        skinCategory,
-        skinCoinsGained: SKIN_COINS_PER_ACTIVITY,
-        ticketsGained,
-        ticketProgress: updatedWalletCategory.ticketProgress,
-        ticketProgressMax: SKIN_TICKET_PROGRESS_PER_TICKET,
-        completedNodes: mapResult.completedNodes,
-        unlockedAchievements: achievementResult.newlyUnlocked,
-      };
-
-      return nextState;
+      const applied = applyCompletedSession(prev, {
+        childId: target.childId,
+        activityId: target.activityId,
+        durationMinutes,
+        effortLevel,
+        note: input.note ?? target.note,
+        tags: input.tags ?? target.tags,
+        mediaAttachments: input.mediaAttachments ?? target.mediaAttachments,
+        sessionId: target.id,
+        dateKey: getSessionDateKey(target),
+      });
+      if (!applied) return prev;
+      result = applied.trainingResult;
+      return applied.nextState;
     });
     return result;
   };
@@ -918,6 +853,21 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       if (!target) return prev;
       const nextSessions = prev.sessions.filter((session) => session.id !== sessionId);
       const childId = target.childId;
+      const attachments = normalizeAttachments(target.mediaAttachments);
+      attachments.forEach((attachment) => {
+        void deleteFromAppStorageIfOwned(attachment.uri);
+      });
+      const mediaItems = prev.mediaItems.filter((item) => item.sessionId !== sessionId);
+
+      if (target.status === 'planned') {
+        response = { ok: true };
+        return {
+          ...prev,
+          sessions: nextSessions,
+          mediaItems,
+          media: mediaItems,
+        };
+      }
 
       const skinCategory = target.skinCategory ?? 'study';
       const categoryTrainingCount = normalizeCategoryTrainingCount(prev.categoryTrainingCount);
@@ -992,13 +942,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       });
 
       const streakByChildId = buildStreakMap(nextSessions, prev.children);
-
-      const attachments = normalizeAttachments(target.mediaAttachments);
-      attachments.forEach((attachment) => {
-        void deleteFromAppStorageIfOwned(attachment.uri);
-      });
-
-      const mediaItems = prev.mediaItems.filter((item) => item.sessionId !== sessionId);
 
       response = { ok: true };
       return {
@@ -1154,6 +1097,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         settings: { enableMemeSkins: false, enableGacha: true, parentPin: undefined },
         appState: null,
         logTrainingSession,
+        completePlannedSession: () => null,
         updateSessionNote,
         updateSessionTags,
         updateSessionAttachments,
@@ -1209,6 +1153,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       settings: state.settings,
       appState: state,
       logTrainingSession,
+      completePlannedSession,
       updateSessionNote,
       updateSessionTags,
       updateSessionAttachments,
@@ -1415,14 +1360,78 @@ function normalizeCategoryTrainingCount(counts?: Partial<CategoryTrainingCount>)
   };
 }
 
+function normalizeSessionStatus(status?: SessionStatus): SessionStatus {
+  return status === 'planned' ? 'planned' : 'completed';
+}
+
+function normalizeSessionNote(note?: string): string {
+  return typeof note === 'string' ? note : '';
+}
+
+function normalizeDurationMinutes(value?: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.round(value));
+}
+
+function normalizeCompletedEffortLevel(value?: number): EffortLevel | null {
+  if (value === 1 || value === 2 || value === 3) return value;
+  return null;
+}
+
+function normalizeDateKey(dateKey?: string): string {
+  if (typeof dateKey !== 'string' || !dateKey.trim()) {
+    return getLocalDateKey(new Date());
+  }
+  const parsed = fromDateKey(dateKey);
+  if (Number.isNaN(parsed.getTime())) {
+    return getLocalDateKey(new Date());
+  }
+  return toDateKey(parsed);
+}
+
+function toSessionIsoFromDateKey(dateKey: string): string {
+  const normalized = normalizeDateKey(dateKey);
+  const parsed = fromDateKey(normalized);
+  if (Number.isNaN(parsed.getTime())) return new Date().toISOString();
+  return parsed.toISOString();
+}
+
 function normalizeSessions(sessions?: TrainingSession[]): TrainingSession[] {
   if (!sessions) return [];
-  return sessions.map((session) => ({
-    ...session,
-    dateKey: session.dateKey ?? getLocalDateKeyFromIso(session.date),
-    tags: normalizeTags(Array.isArray(session.tags) ? session.tags : []),
-    mediaAttachments: normalizeAttachments(session.mediaAttachments),
-  }));
+  return sessions.map((session) => {
+    const status = normalizeSessionStatus(session.status);
+    const dateKey = normalizeDateKey(session.dateKey ?? toDateKey(new Date(session.date)));
+    const tags = normalizeTags(Array.isArray(session.tags) ? session.tags : []);
+    const mediaAttachments = normalizeAttachments(session.mediaAttachments);
+    const note = normalizeSessionNote(session.note);
+    if (status === 'planned') {
+      return {
+        ...session,
+        status,
+        dateKey,
+        date: toSessionIsoFromDateKey(dateKey),
+        durationMinutes: 0,
+        effortLevel: 0,
+        xpGained: 0,
+        coinsGained: 0,
+        tags,
+        note,
+        mediaAttachments,
+      };
+    }
+
+    return {
+      ...session,
+      status,
+      dateKey,
+      date: toSessionIsoFromDateKey(dateKey),
+      durationMinutes: normalizeDurationMinutes(session.durationMinutes),
+      effortLevel: normalizeCompletedEffortLevel(session.effortLevel) ?? 1,
+      tags,
+      note,
+      mediaAttachments,
+    };
+  });
 }
 
 function normalizeAttachments(attachments?: MediaAttachment[]): MediaAttachment[] {
@@ -1711,12 +1720,189 @@ function getSkinCategoryForActivity(activity?: Activity): 'study' | 'exercise' {
   return 'study';
 }
 
+function applyCompletedSession(
+  prev: StoreState,
+  input: ApplyCompletedSessionInput
+): ApplyCompletedSessionResult | null {
+  const existing = prev.sessions.find((session) => session.id === input.sessionId);
+  if (existing && existing.status !== 'planned') {
+    return null;
+  }
+
+  const child = prev.children.find((c) => c.id === input.childId);
+  if (!child) return null;
+
+  const activeBuddyKey = getActiveBuddyKey(prev, input.childId);
+  const buddyBefore = getBuddyProgress(prev, input.childId, activeBuddyKey);
+  const moodBefore = buddyBefore.mood ?? 50;
+  const baseXp = calculateXp(input.durationMinutes, input.effortLevel);
+  const baseCoins = calculateCoins(input.durationMinutes, input.effortLevel);
+  const moodBonus = getMoodBonus(moodBefore);
+  const xpGained = Math.floor(baseXp * moodBonus.xpMultiplier);
+  const coinsGained = baseCoins + moodBonus.extraCoins;
+  const activity = prev.activities.find((a) => a.id === input.activityId);
+  const skinCategory = getSkinCategoryForActivity(activity);
+  const prevWallet = normalizeWallet(prev.wallet);
+  const prevProgress = normalizeProgress(prev.progress);
+  const prevCategoryTrainingCount = normalizeCategoryTrainingCount(prev.categoryTrainingCount);
+  const walletCategory = prevWallet[skinCategory];
+  const nextTicketProgress = walletCategory.ticketProgress + 1;
+  const ticketsGained = Math.floor(nextTicketProgress / SKIN_TICKET_PROGRESS_PER_TICKET);
+  const updatedWalletCategory = {
+    ...walletCategory,
+    coins: walletCategory.coins + SKIN_COINS_PER_ACTIVITY,
+    tickets: walletCategory.tickets + ticketsGained,
+    ticketProgress: nextTicketProgress % SKIN_TICKET_PROGRESS_PER_TICKET,
+  };
+  const walletCoinsDelta = updatedWalletCategory.coins - walletCategory.coins;
+  const walletTicketsDelta = updatedWalletCategory.tickets - walletCategory.tickets;
+  const walletTicketProgressDelta = updatedWalletCategory.ticketProgress - walletCategory.ticketProgress;
+  const wallet = { ...prevWallet, [skinCategory]: updatedWalletCategory };
+  const progress = {
+    ...prevProgress,
+    [skinCategory]: {
+      completedCount: (prevProgress[skinCategory]?.completedCount ?? 0) + 1,
+    },
+  };
+  const categoryTrainingCount = {
+    ...prevCategoryTrainingCount,
+    [skinCategory]: (prevCategoryTrainingCount[skinCategory] ?? 0) + 1,
+  };
+  const treasure = normalizeTreasure(prev.treasure);
+  const updatedTreasure: TreasureState = {
+    ...treasure,
+    progress: treasure.progress + 1,
+  };
+  const buddyBeforeLevel = buddyBefore.level;
+  const buddyUpdated = applyXpToLevel(buddyBefore.level, buddyBefore.xp, xpGained);
+  const updatedBuddyProgress: BuddyProgress = {
+    ...buddyBefore,
+    level: buddyUpdated.level,
+    xp: buddyUpdated.xp,
+    mood: Math.min(100, buddyBefore.mood + 10),
+  };
+  const buddyLevelUps = Math.max(0, buddyUpdated.level - buddyBeforeLevel);
+  const prevBuddyProgressByChildId = prev.buddyProgressByChildId ?? {};
+  const prevChildBuddyProgress = prevBuddyProgressByChildId[input.childId] ?? {};
+  const buddyProgressByChildId = {
+    ...prevBuddyProgressByChildId,
+    [input.childId]: {
+      ...prevChildBuddyProgress,
+      [activeBuddyKey]: updatedBuddyProgress,
+    },
+  };
+  const activeBuddyKeyByChildId = {
+    ...prev.activeBuddyKeyByChildId,
+    [input.childId]: activeBuddyKey,
+  };
+  const discoveredSet = new Set(prev.discoveredFormIdsByChildId?.[input.childId] ?? []);
+  const currentForm = getBuddyForm(activeBuddyKey, updatedBuddyProgress.stageIndex);
+  discoveredSet.add(currentForm.formId);
+  const discoveredFormIdsByChildId = {
+    ...prev.discoveredFormIdsByChildId,
+    [input.childId]: Array.from(discoveredSet),
+  };
+  const normalizedDateKey = normalizeDateKey(input.dateKey);
+  const newSession: TrainingSession = {
+    id: input.sessionId,
+    childId: input.childId,
+    activityId: input.activityId,
+    date: toSessionIsoFromDateKey(normalizedDateKey),
+    dateKey: normalizedDateKey,
+    durationMinutes: input.durationMinutes,
+    effortLevel: input.effortLevel,
+    xpGained,
+    coinsGained,
+    mediaAttachments: normalizeAttachments(input.mediaAttachments),
+    skinCategory,
+    walletCoinsDelta,
+    walletTicketsDelta,
+    walletTicketProgressDelta,
+    treasureProgressDelta: 1,
+    buddyKey: activeBuddyKey,
+    tags: normalizeTags(input.tags),
+    note: normalizeSessionNote(input.note),
+    status: 'completed',
+  };
+  const sessionsWithoutTarget = prev.sessions.filter((session) => session.id !== input.sessionId);
+  const sessions = [...sessionsWithoutTarget, newSession];
+  const streakByChildId = buildStreakMap(sessions, prev.children);
+  const childStreak = streakByChildId[input.childId] ?? { current: 0, best: 0, lastSessionDate: undefined };
+
+  const activeProgress = buddyProgressByChildId[input.childId]?.[activeBuddyKey] ?? updatedBuddyProgress;
+  const updatedChildren = prev.children.map((entry) => {
+    if (entry.id !== input.childId) return entry;
+    return {
+      ...entry,
+      level: activeProgress.level,
+      xp: activeProgress.xp,
+      coins: entry.coins + coinsGained,
+      totalMinutes: entry.totalMinutes + input.durationMinutes,
+      currentStreak: childStreak.current,
+      bestStreak: Math.max(childStreak.best, entry.bestStreak),
+    };
+  });
+
+  let nextState: StoreState = {
+    ...prev,
+    children: updatedChildren,
+    sessions,
+    streakByChildId,
+    wallet,
+    progress,
+    categoryTrainingCount,
+    treasure: updatedTreasure,
+    lastActivityCategory: skinCategory,
+    activeBuddyKeyByChildId,
+    buddyProgressByChildId,
+    discoveredFormIdsByChildId,
+  };
+
+  nextState = ensureMapForChild(nextState, input.childId);
+
+  const { state: withBrain, character } = ensureBrainCharacterForChild(nextState, input.childId);
+  const updatedCharacter: BrainCharacter = {
+    ...character,
+    level: updatedBuddyProgress.level,
+    xp: updatedBuddyProgress.xp,
+    mood: updatedBuddyProgress.mood,
+    skinId: activeBuddyKey,
+  };
+  nextState = {
+    ...withBrain,
+    brainCharacters: withBrain.brainCharacters.map((brain) =>
+      brain.id === updatedCharacter.id ? updatedCharacter : brain
+    ),
+  };
+
+  const mapResult = applyTrainingToMap(nextState, input.childId, xpGained, coinsGained);
+  nextState = mapResult.state;
+  const achievementResult = checkAndUnlockAchievementsForChild(nextState, input.childId);
+  nextState = achievementResult.state;
+
+  return {
+    nextState,
+    trainingResult: {
+      sessionId: newSession.id,
+      buddyLevelUps,
+      buddyXpGained: xpGained,
+      skinCategory,
+      skinCoinsGained: SKIN_COINS_PER_ACTIVITY,
+      ticketsGained,
+      ticketProgress: updatedWalletCategory.ticketProgress,
+      ticketProgressMax: SKIN_TICKET_PROGRESS_PER_TICKET,
+      completedNodes: mapResult.completedNodes,
+      unlockedAchievements: achievementResult.newlyUnlocked,
+    },
+  };
+}
+
 function buildCategoryTrainingCountFromSessions(
   sessions: TrainingSession[],
   activities: Activity[]
 ): CategoryTrainingCount {
   const activityMap = new Map(activities.map((activity) => [activity.id, activity]));
-  return sessions.reduce<CategoryTrainingCount>(
+  return sessions.filter(isCompletedSession).reduce<CategoryTrainingCount>(
     (acc, session) => {
       const activity = activityMap.get(session.activityId);
       const category = getSkinCategoryForActivity(activity);
@@ -1832,7 +2018,7 @@ function mapAttachmentsToMedia(attachments: MediaAttachment[], sessionId: string
     .map((attachment, index) => ({
       id: attachment.id,
       sessionId,
-      type: attachment.type === 'video' ? 'video' : 'photo',
+      type: attachment.type === 'video' ? ('video' as const) : ('photo' as const),
       localUri: attachment.uri,
       createdAt: attachment.createdAtISO,
       order: index,
@@ -2199,7 +2385,7 @@ function checkAndUnlockAchievementsForChild(
   const child = state.children.find((c) => c.id === childId);
   if (!child) return { state, newlyUnlocked: [] };
 
-  const childSessions = state.sessions.filter((s) => s.childId === childId);
+  const childSessions = state.sessions.filter((s) => s.childId === childId && isCompletedSession(s));
   const sessionsCount = childSessions.length;
   const totalMinutes = childSessions.reduce((sum, s) => sum + s.durationMinutes, 0);
   const streakInfo = state.streakByChildId[childId];
@@ -2345,7 +2531,7 @@ function computeStreakFromSessions(sessions: TrainingSession[], childId: string)
   const dates = Array.from(
     new Set(
       sessions
-        .filter((s) => s.childId === childId)
+        .filter((s) => s.childId === childId && isCompletedSession(s))
         .map((s) => getSessionDateKey(s))
     )
   ).sort();
@@ -2389,14 +2575,16 @@ function computeStreakFromSessions(sessions: TrainingSession[], childId: string)
 }
 
 function prevDateKey(dateKey: string) {
-  const date = new Date(`${dateKey}T00:00:00`);
+  const date = fromDateKey(dateKey);
+  if (Number.isNaN(date.getTime())) return getLocalDateKey(new Date());
   date.setDate(date.getDate() - 1);
-  return getLocalDateKey(date);
+  return toDateKey(date);
 }
 
 function dayDiff(fromKey: string, toKey: string) {
-  const from = new Date(`${fromKey}T00:00:00`);
-  const to = new Date(`${toKey}T00:00:00`);
+  const from = fromDateKey(fromKey);
+  const to = fromDateKey(toKey);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 0;
   const diffMs = to.getTime() - from.getTime();
   return Math.floor(diffMs / (1000 * 60 * 60 * 24));
 }

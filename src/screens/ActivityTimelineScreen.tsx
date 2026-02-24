@@ -57,10 +57,11 @@ export function ActivityTimelineScreen({ route, navigation }: Props) {
           const media = getMediaForSession(session.id);
           const thumb = pickThumbnail(media);
           const snippet = makeSnippet(session);
+          const isPlanned = session.status === 'planned';
           return (
             <Pressable
               key={session.id}
-              style={styles.sessionCard}
+              style={[styles.sessionCard, isPlanned && styles.sessionCardPlanned]}
               onPress={() => navigation.navigate('SessionDetail', { childId, sessionId: session.id })}
             >
               <View style={styles.thumbBox}>
@@ -79,9 +80,16 @@ export function ActivityTimelineScreen({ route, navigation }: Props) {
                 )}
               </View>
               <View style={styles.sessionInfo}>
-                <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                <View style={styles.sessionDateRow}>
+                  <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                  {isPlanned && (
+                    <View style={styles.statusBadge}>
+                      <Text style={styles.statusBadgeText}>予定</Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={styles.sessionMeta}>
-                  {session.durationMinutes}分 / {'★'.repeat(session.effortLevel)}
+                  {isPlanned ? '予定（未確定）' : `${session.durationMinutes}分 / ${'★'.repeat(session.effortLevel)}`}
                 </Text>
                 {snippet.length > 0 && <Text style={styles.sessionNote}>{snippet}</Text>}
               </View>
@@ -175,6 +183,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     ...theme.shadows.card,
   },
+  sessionCardPlanned: {
+    opacity: 0.7,
+  },
   thumbBox: {
     width: 72,
     height: 72,
@@ -211,9 +222,27 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  sessionDateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+  },
   sessionDate: {
     ...theme.typography.label,
     color: theme.colors.textMain,
+  },
+  statusBadge: {
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 2,
+    backgroundColor: theme.colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+  },
+  statusBadgeText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    fontSize: 10,
   },
   sessionMeta: {
     ...theme.typography.caption,

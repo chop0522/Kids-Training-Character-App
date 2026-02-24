@@ -149,19 +149,27 @@ export function RecordSearchScreen({ navigation, route }: Props) {
 
         {results.map((session) => {
           const activity = activityMap.get(session.activityId);
+          const isPlanned = session.status === 'planned';
           return (
             <Pressable
               key={session.id}
-              style={({ pressed }) => [styles.sessionCard, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.sessionCard, isPlanned && styles.sessionCardPlanned, pressed && styles.pressed]}
               onPress={() => navigation.navigate('SessionDetail', { childId: child.id, sessionId: session.id })}
             >
               <View style={styles.sessionInfo}>
-                <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                <View style={styles.sessionDateRow}>
+                  <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                  {isPlanned && (
+                    <View style={styles.statusBadge}>
+                      <Text style={styles.statusBadgeText}>予定</Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={styles.sessionTitle}>
                   {activity?.iconKey ?? '⭐️'} {activity?.name ?? 'トレーニング'}
                 </Text>
                 <Text style={styles.sessionMeta}>
-                  {session.durationMinutes}分 / {'★'.repeat(session.effortLevel)}
+                  {isPlanned ? '予定（未確定）' : `${session.durationMinutes}分 / ${'★'.repeat(session.effortLevel)}`}
                 </Text>
                 {session.tags.length > 0 && (
                   <View style={styles.sessionTags}>
@@ -339,15 +347,36 @@ const styles = StyleSheet.create({
     marginBottom: theme.spacing.sm,
     ...theme.shadows.card,
   },
+  sessionCardPlanned: {
+    opacity: 0.7,
+  },
   pressed: {
     opacity: 0.95,
   },
   sessionInfo: {
     gap: 4,
   },
+  sessionDateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+  },
   sessionDate: {
     ...theme.typography.label,
     color: theme.colors.textMain,
+  },
+  statusBadge: {
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 2,
+    backgroundColor: theme.colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+  },
+  statusBadgeText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    fontSize: 10,
   },
   sessionTitle: {
     ...theme.typography.body,

@@ -47,6 +47,7 @@ export function RecordScreen({ navigation, route }: Props) {
   }, [sessions]);
 
   const todayKey = useMemo(() => getLocalDateKey(new Date()), []);
+  const defaultLogDateKey = viewMode === 'calendar' ? selectedCalendarDate : todayKey;
   const dateOptions = useMemo(() => {
     const options: Array<{ key: string; label: string; count: number; isToday: boolean }> = [];
     for (let i = 0; i < 14; i += 1) {
@@ -143,7 +144,13 @@ export function RecordScreen({ navigation, route }: Props) {
 
         <PrimaryButton
           title="⭐ トレーニングを記録する"
-          onPress={() => navigation.navigate('TrainingLog', { childId: child.id })}
+          onPress={() =>
+            navigation.navigate('TrainingLog', {
+              childId: child.id,
+              dateKey: defaultLogDateKey,
+              status: defaultLogDateKey > todayKey ? 'planned' : 'completed',
+            })
+          }
           style={styles.primaryButton}
         />
 
@@ -229,10 +236,15 @@ export function RecordScreen({ navigation, route }: Props) {
               const activity = activityMap.get(session.activityId);
               const media = getMediaForSession(session.id);
               const thumb = pickThumbnail(media);
+              const isPlanned = session.status === 'planned';
               return (
                 <Pressable
                   key={session.id}
-                  style={({ pressed }) => [styles.sessionCard, pressed && styles.pressed]}
+                  style={({ pressed }) => [
+                    styles.sessionCard,
+                    isPlanned && styles.sessionCardPlanned,
+                    pressed && styles.pressed,
+                  ]}
                   onPress={() => navigation.navigate('SessionDetail', { childId: child.id, sessionId: session.id })}
                 >
                   <View style={styles.thumbBox}>
@@ -251,12 +263,19 @@ export function RecordScreen({ navigation, route }: Props) {
                     )}
                   </View>
                   <View style={styles.sessionInfo}>
-                    <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                    <View style={styles.sessionDateRow}>
+                      <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                      {isPlanned && (
+                        <View style={styles.statusBadge}>
+                          <Text style={styles.statusBadgeText}>予定</Text>
+                        </View>
+                      )}
+                    </View>
                     <Text style={styles.sessionTitle}>
                       {activity?.iconKey ?? '⭐️'} {activity?.name ?? 'トレーニング'}
                     </Text>
                     <Text style={styles.sessionMeta}>
-                      {session.durationMinutes}分 / {'★'.repeat(session.effortLevel)}
+                      {isPlanned ? '予定（未確定）' : `${session.durationMinutes}分 / ${'★'.repeat(session.effortLevel)}`}
                     </Text>
                     {session.tags.length > 0 && (
                       <View style={styles.tagRow}>
@@ -316,10 +335,15 @@ export function RecordScreen({ navigation, route }: Props) {
               const activity = activityMap.get(session.activityId);
               const media = getMediaForSession(session.id);
               const thumb = pickThumbnail(media);
+              const isPlanned = session.status === 'planned';
               return (
                 <Pressable
                   key={session.id}
-                  style={({ pressed }) => [styles.sessionCard, pressed && styles.pressed]}
+                  style={({ pressed }) => [
+                    styles.sessionCard,
+                    isPlanned && styles.sessionCardPlanned,
+                    pressed && styles.pressed,
+                  ]}
                   onPress={() => navigation.navigate('SessionDetail', { childId: child.id, sessionId: session.id })}
                 >
                   <View style={styles.thumbBox}>
@@ -338,12 +362,19 @@ export function RecordScreen({ navigation, route }: Props) {
                     )}
                   </View>
                   <View style={styles.sessionInfo}>
-                    <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                    <View style={styles.sessionDateRow}>
+                      <Text style={styles.sessionDate}>{formatDate(session.date)}</Text>
+                      {isPlanned && (
+                        <View style={styles.statusBadge}>
+                          <Text style={styles.statusBadgeText}>予定</Text>
+                        </View>
+                      )}
+                    </View>
                     <Text style={styles.sessionTitle}>
                       {activity?.iconKey ?? '⭐️'} {activity?.name ?? 'トレーニング'}
                     </Text>
                     <Text style={styles.sessionMeta}>
-                      {session.durationMinutes}分 / {'★'.repeat(session.effortLevel)}
+                      {isPlanned ? '予定（未確定）' : `${session.durationMinutes}分 / ${'★'.repeat(session.effortLevel)}`}
                     </Text>
                     {session.tags.length > 0 && (
                       <View style={styles.tagRow}>
@@ -666,6 +697,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     ...theme.shadows.card,
   },
+  sessionCardPlanned: {
+    opacity: 0.7,
+  },
   thumbBox: {
     width: 72,
     height: 72,
@@ -702,9 +736,27 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  sessionDateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+  },
   sessionDate: {
     ...theme.typography.label,
     color: theme.colors.textMain,
+  },
+  statusBadge: {
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 2,
+    backgroundColor: theme.colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+  },
+  statusBadgeText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    fontSize: 10,
   },
   sessionTitle: {
     ...theme.typography.body,

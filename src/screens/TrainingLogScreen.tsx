@@ -18,15 +18,24 @@ import { theme } from '../theme';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { MediaAttachmentsEditor } from '../components/MediaAttachmentsEditor';
 import { calculateCoins, calculateXp, EffortLevel } from '../xp';
-import type { MediaAttachment, TrainingResult } from '../types';
+import type { MediaAttachment, SessionStatus, TrainingResult } from '../types';
 import { buildTagFrequency, formatTag, normalizeTag, normalizeTags, parseTagsFromText, uniqueTags } from '../utils/tagUtils';
 import { nanoid } from 'nanoid/non-secure';
+import { fromDateKey, toDateKey } from '../utils/dateKey';
 
 type TrainingLogParamList = {
-  TrainingLog: { childId: string };
+  TrainingLog: { childId: string; dateKey?: string; status?: SessionStatus };
 };
 
 type Props = NativeStackScreenProps<TrainingLogParamList, 'TrainingLog'>;
+
+type CalendarCell = {
+  dateKey: string;
+  label: number;
+  isCurrentMonth: boolean;
+  isToday: boolean;
+  isSelected: boolean;
+};
 
 const quickDurations = [5, 10, 20, 30];
 
@@ -35,8 +44,15 @@ export function TrainingLogScreen({ navigation, route }: Props) {
   const childId = route.params.childId;
   const child = getChildById(childId);
   const activities = child ? getActivitiesForFamily(child.familyId) : [];
+  const todayKey = useMemo(() => toDateKey(new Date()), []);
+
+  const initialDateKey = route.params?.dateKey ?? todayKey;
+  const initialStatus = route.params?.status ?? defaultStatusForDate(initialDateKey, todayKey);
 
   const [activityId, setActivityId] = useState<string | undefined>(activities[0]?.id);
+  const [selectedDateKey, setSelectedDateKey] = useState(initialDateKey);
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>(initialStatus);
+  const [statusTouched, setStatusTouched] = useState(Boolean(route.params?.status));
   const [durationText, setDurationText] = useState('20');
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(2);
   const [note, setNote] = useState('');
@@ -45,6 +61,9 @@ export function TrainingLogScreen({ navigation, route }: Props) {
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [saving, setSaving] = useState(false);
   const [rewardResult, setRewardResult] = useState<TrainingResult | null>(null);
+  const [isDatePickerVisible, setIsDatePickerVisible] = useState(false);
+  const [pickerDateKey, setPickerDateKey] = useState(selectedDateKey);
+  const [pickerMonth, setPickerMonth] = useState(() => fromDateKey(selectedDateKey));
   const draftSessionIdRef = useRef<string>(nanoid(10));
 
   useEffect(() => {
@@ -53,10 +72,16 @@ export function TrainingLogScreen({ navigation, route }: Props) {
     }
   }, [activities, activityId]);
 
+  useEffect(() => {
+    if (statusTouched) return;
+    setSessionStatus(defaultStatusForDate(selectedDateKey, todayKey));
+  }, [selectedDateKey, statusTouched, todayKey]);
+
   const durationMinutes = useMemo(() => Number(durationText) || 0, [durationText]);
   const xpPreview = useMemo(() => calculateXp(durationMinutes, effortLevel), [durationMinutes, effortLevel]);
   const coinPreview = useMemo(() => calculateCoins(durationMinutes, effortLevel), [durationMinutes, effortLevel]);
-  const canSave = Boolean(activityId) && durationMinutes > 0 && !saving;
+  const isPlanned = sessionStatus === 'planned';
+  const canSave = Boolean(activityId) && !saving && (isPlanned || durationMinutes > 0);
   const childSessions = useMemo(() => (child ? getSessionsForChild(child.id) : []), [child, getSessionsForChild]);
   const recentSessions = useMemo(
     () => [...childSessions].sort((a, b) => (a.date > b.date ? -1 : 1)).slice(0, 30),
@@ -72,6 +97,11 @@ export function TrainingLogScreen({ navigation, route }: Props) {
     const current = new Set(tags.map((tag) => tag.toLowerCase()));
     return merged.filter((tag) => !current.has(tag.toLowerCase()));
   }, [fixedTagSuggestions, frequentTags, tags]);
+
+  const calendarWeeks = useMemo(
+    () => buildCalendarWeeks(pickerMonth, pickerDateKey, todayKey),
+    [pickerMonth, pickerDateKey, todayKey]
+  );
 
   const handleAddTagsFromInput = () => {
     const parsed = parseTagsFromText(tagInput);
@@ -90,6 +120,17 @@ export function TrainingLogScreen({ navigation, route }: Props) {
     setTags((prev) => prev.filter((item) => item !== tag));
   };
 
+  const handleStatusChange = (status: SessionStatus) => {
+    setStatusTouched(true);
+    setSessionStatus(status);
+  };
+
+  const openDatePicker = () => {
+    setPickerDateKey(selectedDateKey);
+    setPickerMonth(fromDateKey(selectedDateKey));
+    setIsDatePickerVisible(true);
+  };
+
   const handleSave = () => {
     if (!child || !activityId || !canSave) return;
     setSaving(true);
@@ -99,12 +140,23 @@ export function TrainingLogScreen({ navigation, route }: Props) {
       activityId,
       durationMinutes,
       effortLevel,
-      note: note.trim() || undefined,
+      dateKey: selectedDateKey,
+      status: sessionStatus,
+      note: note.trim(),
       tags: finalTags,
       mediaAttachments: attachments,
       sessionId: draftSessionIdRef.current,
     });
     setSaving(false);
+
+    if (isPlanned) {
+      setAttachments([]);
+      draftSessionIdRef.current = nanoid(10);
+      showAlert('予定を保存しました', 'あとで写真やコメントを追加できます');
+      navigation.goBack();
+      return;
+    }
+
     if (!result) {
       showAlert('エラー', '保存に失敗しました');
       return;
@@ -139,6 +191,39 @@ export function TrainingLogScreen({ navigation, route }: Props) {
           </View>
 
           <View style={styles.section}>
+            <Text style={styles.label}>日付</Text>
+            <Pressable style={styles.dateButton} onPress={openDatePicker}>
+              <Text style={styles.dateButtonValue}>{formatDateKey(selectedDateKey)}</Text>
+              <Text style={styles.dateButtonAction}>変更</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.section}>
+            <Text style={styles.label}>種別</Text>
+            <View style={styles.modeSegmentRow}>
+              <Pressable
+                onPress={() => handleStatusChange('completed')}
+                style={[styles.modeSegmentButton, sessionStatus === 'completed' && styles.modeSegmentButtonSelected]}
+              >
+                <Text style={[styles.modeSegmentText, sessionStatus === 'completed' && styles.modeSegmentTextSelected]}>
+                  記録
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => handleStatusChange('planned')}
+                style={[styles.modeSegmentButton, sessionStatus === 'planned' && styles.modeSegmentButtonSelected]}
+              >
+                <Text style={[styles.modeSegmentText, sessionStatus === 'planned' && styles.modeSegmentTextSelected]}>
+                  予定
+                </Text>
+              </Pressable>
+            </View>
+            {isPlanned && (
+              <Text style={styles.helperText}>予定として保存できます。あとで写真やコメントを追加できます</Text>
+            )}
+          </View>
+
+          <View style={styles.section}>
             <Text style={styles.label}>種目</Text>
             <View style={styles.optionRow}>
               {activities.map((activity) => {
@@ -158,50 +243,54 @@ export function TrainingLogScreen({ navigation, route }: Props) {
             </View>
           </View>
 
-          <View style={styles.section}>
-            <Text style={styles.label}>時間（分）</Text>
-            <TextInput
-              style={styles.textInput}
-              keyboardType="numeric"
-              value={durationText}
-              onChangeText={setDurationText}
-              placeholder="数字を入力"
-              placeholderTextColor={theme.colors.textDisabled}
-            />
-            <View style={styles.quickButtonsRow}>
-              {quickDurations.map((d) => {
-                const selected = durationMinutes === d;
-                return (
-                  <Pressable
-                    key={d}
-                    onPress={() => setDurationText(String(d))}
-                    style={[styles.quickButton, selected && styles.quickButtonSelected]}
-                  >
-                    <Text style={[styles.quickButtonText, selected && styles.quickButtonTextSelected]}>{d} 分</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
+          {!isPlanned && (
+            <>
+              <View style={styles.section}>
+                <Text style={styles.label}>時間（分）</Text>
+                <TextInput
+                  style={styles.textInput}
+                  keyboardType="numeric"
+                  value={durationText}
+                  onChangeText={setDurationText}
+                  placeholder="数字を入力"
+                  placeholderTextColor={theme.colors.textDisabled}
+                />
+                <View style={styles.quickButtonsRow}>
+                  {quickDurations.map((d) => {
+                    const selected = durationMinutes === d;
+                    return (
+                      <Pressable
+                        key={d}
+                        onPress={() => setDurationText(String(d))}
+                        style={[styles.quickButton, selected && styles.quickButtonSelected]}
+                      >
+                        <Text style={[styles.quickButtonText, selected && styles.quickButtonTextSelected]}>{d} 分</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
 
-          <View style={styles.section}>
-            <Text style={styles.label}>がんばり度</Text>
-            <View style={styles.optionRow}>
-              {[1, 2, 3].map((level) => {
-                const selected = effortLevel === level;
-                return (
-                  <Pressable
-                    key={level}
-                    onPress={() => setEffortLevel(level as EffortLevel)}
-                    style={[styles.chip, selected ? styles.chipSelected : styles.chipUnselected]}
-                  >
-                    <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{level}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            <Text style={styles.helperText}>1 = ふつう / 2 = がんばった / 3 = すごくがんばった</Text>
-          </View>
+              <View style={styles.section}>
+                <Text style={styles.label}>がんばり度</Text>
+                <View style={styles.optionRow}>
+                  {[1, 2, 3].map((level) => {
+                    const selected = effortLevel === level;
+                    return (
+                      <Pressable
+                        key={level}
+                        onPress={() => setEffortLevel(level as EffortLevel)}
+                        style={[styles.chip, selected ? styles.chipSelected : styles.chipUnselected]}
+                      >
+                        <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{level}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={styles.helperText}>1 = ふつう / 2 = がんばった / 3 = すごくがんばった</Text>
+              </View>
+            </>
+          )}
 
           <View style={styles.section}>
             <Text style={styles.label}>タグ</Text>
@@ -263,17 +352,115 @@ export function TrainingLogScreen({ navigation, route }: Props) {
             />
           </View>
 
-          <View style={styles.previewCard}>
-            <Text style={styles.previewLabel}>今回の報酬</Text>
-            <Text style={styles.previewValue}>XP +{xpPreview} / コイン +{coinPreview}</Text>
-          </View>
+          {!isPlanned && (
+            <View style={styles.previewCard}>
+              <Text style={styles.previewLabel}>今回の報酬</Text>
+              <Text style={styles.previewValue}>XP +{xpPreview} / コイン +{coinPreview}</Text>
+            </View>
+          )}
 
-          <PrimaryButton title={saving ? '保存中...' : '保存する'} onPress={handleSave} disabled={!canSave} />
+          <PrimaryButton
+            title={saving ? '保存中...' : isPlanned ? '予定として保存' : '記録を保存'}
+            onPress={handleSave}
+            disabled={!canSave}
+          />
           <Pressable style={styles.cancelButton} onPress={() => navigation.goBack()}>
             <Text style={styles.cancelButtonText}>キャンセル</Text>
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <Modal
+        transparent
+        visible={isDatePickerVisible}
+        animationType="fade"
+        onRequestClose={() => setIsDatePickerVisible(false)}
+      >
+        <View style={styles.pickerOverlay}>
+          <View style={styles.pickerCard}>
+            <Text style={styles.pickerTitle}>日付を選択</Text>
+            <View style={styles.pickerHeader}>
+              <Pressable
+                onPress={() => {
+                  const next = new Date(pickerMonth);
+                  next.setMonth(next.getMonth() - 1);
+                  setPickerMonth(next);
+                }}
+                style={styles.pickerNav}
+              >
+                <Text style={styles.pickerNavText}>‹</Text>
+              </Pressable>
+              <Text style={styles.pickerMonthText}>{formatMonthLabel(pickerMonth)}</Text>
+              <Pressable
+                onPress={() => {
+                  const next = new Date(pickerMonth);
+                  next.setMonth(next.getMonth() + 1);
+                  setPickerMonth(next);
+                }}
+                style={styles.pickerNav}
+              >
+                <Text style={styles.pickerNavText}>›</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.weekHeader}>
+              {['日', '月', '火', '水', '木', '金', '土'].map((label) => (
+                <Text key={label} style={styles.weekHeaderText}>
+                  {label}
+                </Text>
+              ))}
+            </View>
+
+            <View style={styles.calendarGrid}>
+              {calendarWeeks.map((week, index) => (
+                <View key={`week-${index}`} style={styles.weekRow}>
+                  {week.map((cell) => (
+                    <Pressable
+                      key={cell.dateKey}
+                      onPress={() => setPickerDateKey(cell.dateKey)}
+                      style={[
+                        styles.dayCell,
+                        !cell.isCurrentMonth && styles.dayCellMuted,
+                        cell.isSelected && styles.dayCellSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.dayLabel,
+                          cell.isToday && styles.dayLabelToday,
+                          !cell.isCurrentMonth && styles.dayLabelMuted,
+                          cell.isSelected && styles.dayLabelSelected,
+                        ]}
+                      >
+                        {cell.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ))}
+            </View>
+
+            <View style={styles.pickerActions}>
+              <Pressable style={styles.pickerSecondary} onPress={() => setIsDatePickerVisible(false)}>
+                <Text style={styles.pickerSecondaryText}>キャンセル</Text>
+              </Pressable>
+              <Pressable
+                style={styles.pickerPrimary}
+                onPress={() => {
+                  setSelectedDateKey(pickerDateKey);
+                  if (!statusTouched) {
+                    setSessionStatus(defaultStatusForDate(pickerDateKey, todayKey));
+                  }
+                  setIsDatePickerVisible(false);
+                }}
+              >
+                <Text style={styles.pickerPrimaryText}>決定</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal
         transparent
         visible={Boolean(rewardResult)}
@@ -311,6 +498,48 @@ export function TrainingLogScreen({ navigation, route }: Props) {
       </Modal>
     </SafeAreaView>
   );
+}
+
+function defaultStatusForDate(dateKey: string, todayKey: string): SessionStatus {
+  return dateKey > todayKey ? 'planned' : 'completed';
+}
+
+function formatDateKey(dateKey: string) {
+  const [y, m, d] = dateKey.split('-');
+  if (!y || !m || !d) return dateKey;
+  return `${y}/${m}/${d}`;
+}
+
+function formatMonthLabel(date: Date) {
+  return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+}
+
+function buildCalendarWeeks(monthDate: Date, selectedDateKey: string, todayKey: string): CalendarCell[][] {
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const startOffset = firstDay.getDay();
+  const startDate = new Date(year, month, 1 - startOffset);
+  const weeks: CalendarCell[][] = [];
+
+  for (let week = 0; week < 6; week += 1) {
+    const days: CalendarCell[] = [];
+    for (let day = 0; day < 7; day += 1) {
+      const cellDate = new Date(startDate);
+      cellDate.setDate(startDate.getDate() + week * 7 + day);
+      const dateKey = toDateKey(cellDate);
+      days.push({
+        dateKey,
+        label: cellDate.getDate(),
+        isCurrentMonth: cellDate.getMonth() === month,
+        isToday: dateKey === todayKey,
+        isSelected: dateKey === selectedDateKey,
+      });
+    }
+    weeks.push(days);
+  }
+
+  return weeks;
 }
 
 function showAlert(title: string, message?: string) {
@@ -373,6 +602,48 @@ const styles = StyleSheet.create({
     ...theme.typography.label,
     color: theme.colors.textMain,
     marginBottom: theme.spacing.xs,
+  },
+  dateButton: {
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    backgroundColor: theme.colors.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dateButtonValue: {
+    ...theme.typography.body,
+    color: theme.colors.textMain,
+  },
+  dateButtonAction: {
+    ...theme.typography.label,
+    color: theme.colors.accent,
+  },
+  modeSegmentRow: {
+    flexDirection: 'row',
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.lg,
+    padding: 4,
+  },
+  modeSegmentButton: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: theme.spacing.xs,
+    borderRadius: theme.radius.lg,
+  },
+  modeSegmentButtonSelected: {
+    backgroundColor: theme.colors.primary,
+  },
+  modeSegmentText: {
+    ...theme.typography.label,
+    color: theme.colors.textSub,
+  },
+  modeSegmentTextSelected: {
+    color: '#FFFFFF',
   },
   textInput: {
     ...theme.typography.body,
@@ -524,6 +795,118 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     ...theme.typography.body,
     color: theme.colors.textSub,
+  },
+  pickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: theme.spacing.lg,
+  },
+  pickerCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+  },
+  pickerTitle: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+    marginBottom: theme.spacing.sm,
+  },
+  pickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: theme.spacing.xs,
+  },
+  pickerNav: {
+    width: 32,
+    height: 32,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surfaceAlt,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerNavText: {
+    ...theme.typography.heading2,
+    color: theme.colors.textMain,
+  },
+  pickerMonthText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  weekHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: theme.spacing.xs,
+  },
+  weekHeaderText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSub,
+    textAlign: 'center',
+    flex: 1,
+  },
+  calendarGrid: {
+    marginBottom: theme.spacing.sm,
+  },
+  weekRow: {
+    flexDirection: 'row',
+  },
+  dayCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: theme.spacing.xs,
+    borderRadius: theme.radius.md,
+    marginVertical: 2,
+  },
+  dayCellMuted: {
+    opacity: 0.4,
+  },
+  dayCellSelected: {
+    backgroundColor: theme.colors.primary,
+  },
+  dayLabel: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  dayLabelToday: {
+    color: theme.colors.accent,
+  },
+  dayLabelMuted: {
+    color: theme.colors.textSub,
+  },
+  dayLabelSelected: {
+    color: '#FFFFFF',
+  },
+  pickerActions: {
+    marginTop: theme.spacing.xs,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: theme.spacing.sm,
+  },
+  pickerSecondary: {
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.borderSoft,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+  },
+  pickerSecondaryText: {
+    ...theme.typography.label,
+    color: theme.colors.textMain,
+  },
+  pickerPrimary: {
+    borderRadius: theme.radius.lg,
+    backgroundColor: theme.colors.primary,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
+  },
+  pickerPrimaryText: {
+    ...theme.typography.label,
+    color: '#FFFFFF',
   },
   rewardOverlay: {
     flex: 1,

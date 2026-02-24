@@ -1,0 +1,11 @@
+Use case: stylized-concept
+Asset type: iOS app icon
+Primary request: kid-friendly reward-tracking app icon, highly readable at small sizes
+Style/medium: soft 2D illustration with bold simple shapes and clean thick edges
+Composition/framing: centered focal symbol, full square canvas, strong silhouette, generous padding
+Lighting/mood: bright, joyful, warm reward feeling
+Constraints: 1024x1024 exact square; no rounded-corner framing; opaque background only; no transparent pixels; no tiny text; no watermark; no thin detail lines
+Avoid: clutter, photorealism, tiny typography, hairline strokes, transparent background
+Primary motif: closed album/book-card silhouette with a sparkle star at one corner
+Character usage: symbol-first, optional tiny frog badge only
+Palette: warm yellow + orange accents + deep outline contrast
